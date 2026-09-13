@@ -47,7 +47,8 @@ def get_loaders(dataset_cls, path, batch_size=32, valid=0.1, num_workers=0, pin_
     return train_loader, valid_loader, test_loader
 
 
-def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False, w_shift=0.0):
+def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False,
+                        w_shift=0.0, warmup=False):
     losses, preds, labels, masks = [], [], [], []
     s_preds, s_labels = [], []
 
@@ -64,7 +65,8 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
             qmask = qmask.permute(1, 0, 2)                       # [B, T, n_speakers]
             lengths = umask.sum(dim=1).long()                    # [B]
 
-            log_prob, prob, _, shift_logits = model(textf, visuf, acouf, umask, qmask, lengths)
+            log_prob, prob, _, shift_logits = model(textf, visuf, acouf, umask, qmask, lengths,
+                                                    warmup=warmup)
 
             lp_ = log_prob.view(-1, log_prob.size(2))
             labels_ = label.view(-1)
@@ -133,6 +135,17 @@ if __name__ == '__main__':
     # emotion shift
     parser.add_argument('--use_shift', action='store_true', help='enable the 9-way shift head')
     parser.add_argument('--w_shift', type=float, default=0.3, help='weight of the shift loss')
+    # emotional context graph (segment partition + sheaf); needs --use_shift
+    parser.add_argument('--graph2', default='none', choices=['none', 'gat', 'sheaf'])
+    parser.add_argument('--sheaf_d', type=int, default=4, help='stalk dimension (must divide hidden_dim)')
+    parser.add_argument('--sheaf_layers', type=int, default=2)
+    parser.add_argument('--sheaf_map', default='diag', choices=['diag', 'general'])
+    parser.add_argument('--sheaf_step', type=float, default=1.0, help='Euler step size tau')
+    parser.add_argument('--graph2_heads', type=int, default=4, help='only for --graph2 gat')
+    parser.add_argument('--graph2_layers', type=int, default=1, help='only for --graph2 gat')
+    parser.add_argument('--graph2_dropout', type=float, default=0.1)
+    parser.add_argument('--warmup_epochs', type=int, default=5,
+                        help='epochs with graph2 disabled, while the shift head is still random')
     args = parser.parse_args()
     print(args)
     seed_everything(args.seed)
@@ -153,7 +166,11 @@ if __name__ == '__main__':
                           heads=args.heads, layers=args.layers, window=args.window,
                           link_prev_same=args.link_prev_same, graph_dropout=args.graph_dropout,
                           attn_dropout=args.attn_dropout, init_lambda=args.init_lambda,
-                          learn_prior=not args.freeze_prior, gate=not args.no_gate).to(device)
+                          learn_prior=not args.freeze_prior, gate=not args.no_gate,
+                          graph2=args.graph2, sheaf_d=args.sheaf_d, sheaf_layers=args.sheaf_layers,
+                          sheaf_map=args.sheaf_map, sheaf_step=args.sheaf_step,
+                          graph2_heads=args.graph2_heads, graph2_layers=args.graph2_layers,
+                          graph2_dropout=args.graph2_dropout).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -179,8 +196,10 @@ if __name__ == '__main__':
 
     for e in range(args.epochs):
         start_time = time.time()
-        tr = train_or_eval_model(model, loss_function, train_loader, optimizer, True, args.w_shift)
-        te = train_or_eval_model(model, loss_function, test_loader, train=False, w_shift=args.w_shift)
+        warm = args.graph2 != 'none' and e < args.warmup_epochs
+        tr = train_or_eval_model(model, loss_function, train_loader, optimizer, True, args.w_shift, warm)
+        te = train_or_eval_model(model, loss_function, test_loader, train=False,
+                                 w_shift=args.w_shift, warmup=warm)
         scheduler.step()
 
         all_test_fscore.append(te['fscore'])
@@ -193,6 +212,8 @@ if __name__ == '__main__':
             e + 1, tr['loss'], tr['acc'], tr['fscore'], te['loss'], te['acc'], te['fscore'])
         if te['shift_f1'] is not None:
             msg += ', shift_acc: {}, shift_mF1: {}'.format(te['shift_acc'], te['shift_f1'])
+        if args.graph2 != 'none':
+            msg += ', alpha: {:.3f}'.format(torch.sigmoid(model.alpha).item()) + (' [warmup]' if warm else '')
         print(msg + ', time: {} sec'.format(round(time.time() - start_time, 2)))
 
         if args.use_graph and not args.freeze_prior and (e + 1) % 10 == 0:
