@@ -66,7 +66,7 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
             lengths = umask.sum(dim=1).long()                    # [B]
 
             log_prob, prob, _, shift_logits = model(textf, visuf, acouf, umask, qmask, lengths,
-                                                    warmup=warmup)
+                                                    warmup=warmup, labels=label)
 
             lp_ = log_prob.view(-1, log_prob.size(2))
             labels_ = label.view(-1)
@@ -144,6 +144,8 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_heads', type=int, default=4, help='only for --graph2 gat')
     parser.add_argument('--graph2_layers', type=int, default=1, help='only for --graph2 gat')
     parser.add_argument('--graph2_dropout', type=float, default=0.1)
+    parser.add_argument('--oracle_shift', action='store_true',
+                        help='build the partition from ground-truth shifts (ceiling experiment)')
     parser.add_argument('--warmup_epochs', type=int, default=5,
                         help='epochs with graph2 disabled, while the shift head is still random')
     args = parser.parse_args()
@@ -170,7 +172,7 @@ if __name__ == '__main__':
                           graph2=args.graph2, sheaf_d=args.sheaf_d, sheaf_layers=args.sheaf_layers,
                           sheaf_map=args.sheaf_map, sheaf_step=args.sheaf_step,
                           graph2_heads=args.graph2_heads, graph2_layers=args.graph2_layers,
-                          graph2_dropout=args.graph2_dropout).to(device)
+                          graph2_dropout=args.graph2_dropout, oracle_shift=args.oracle_shift).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from semantic_GAT import SemanticContextGraph
-from shift import ShiftHead, build_shift_pairs, polarity_map
+from shift import ShiftHead, build_shift_pairs, polarity_map, shift_labels
 from sheaf import EmotionalGATGraph, EmotionalSheafGraph, predict_shift
 
 
@@ -42,7 +42,7 @@ class BaselineModel(nn.Module):
                  heads=4, layers=1, window=4, link_prev_same=False,
                  graph_dropout=0.1, attn_dropout=0.0, init_lambda=0.5, learn_prior=True, gate=True,
                  graph2='none', sheaf_d=4, sheaf_layers=2, sheaf_map='diag', sheaf_step=1.0,
-                 graph2_heads=4, graph2_layers=1, graph2_dropout=0.1):
+                 graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -60,7 +60,7 @@ class BaselineModel(nn.Module):
             self.shift = ShiftHead(hidden_dim, dropout)
             self.register_buffer('pol', polarity_map(dataset))
 
-        self.graph2 = graph2
+        self.graph2, self.oracle_shift = graph2, oracle_shift
         if graph2 != 'none':
             assert use_shift, "graph2 needs the shift head to build the partition (--use_shift)"
             if graph2 == 'sheaf':
@@ -76,7 +76,8 @@ class BaselineModel(nn.Module):
             self.ln2 = nn.LayerNorm(hidden_dim)
             self.alpha = nn.Parameter(torch.zeros(1))       # sigmoid(0) = 0.5 at init
 
-    def forward(self, textf, visuf, acouf, umask=None, qmask=None, lengths=None, warmup=False):
+    def forward(self, textf, visuf, acouf, umask=None, qmask=None, lengths=None, warmup=False,
+                labels=None):
         # inputs: [T, B, D_m]  ->  outputs: [B, T, *]
         inputs = {'t': textf, 'a': acouf, 'v': visuf}
         x = [self.proj[m](inputs[m].permute(1, 0, 2)) for m in self.modals]      # M x [B, T, H]
@@ -89,7 +90,14 @@ class BaselineModel(nn.Module):
             shift_logits = self.shift(h, prev)                                   # [B, T, 2, 9]
 
         if self.graph2 != 'none' and not warmup:
-            sp = predict_shift(shift_logits.detach())                            # [B, T, 2] bool
+            if self.oracle_shift:
+                # ceiling experiment: build the partition from ground-truth polarities
+                assert labels is not None, '--oracle_shift needs the labels'
+                p = self.pol[labels.clamp(min=0)]
+                sp = (torch.gather(p.unsqueeze(-1).expand(-1, -1, 2), 1, prev) !=
+                      p.unsqueeze(-1)) & valid
+            else:
+                sp = predict_shift(shift_logits.detach())                        # [B, T, 2] bool
             h2 = sum(self.emo(x, qmask, umask, sp, prev, valid))
             a = torch.sigmoid(self.alpha)
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
