@@ -144,6 +144,11 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_heads', type=int, default=4, help='only for --graph2 gat')
     parser.add_argument('--graph2_layers', type=int, default=1, help='only for --graph2 gat')
     parser.add_argument('--graph2_dropout', type=float, default=0.1)
+    parser.add_argument('--graph2_no_inter_modal', action='store_true',
+                        help='graph 2 only: drop inter-modal edges (one sub-graph per modality)')
+    parser.add_argument('--graph2_per_modal', action='store_true',
+                        help='graph 2 only: separate weights per modality '
+                             '(needs --graph2_no_inter_modal)')
     parser.add_argument('--oracle_shift', action='store_true',
                         help='build the partition from ground-truth shifts (ceiling experiment)')
     parser.add_argument('--warmup_epochs', type=int, default=5,
@@ -172,7 +177,9 @@ if __name__ == '__main__':
                           graph2=args.graph2, sheaf_d=args.sheaf_d, sheaf_layers=args.sheaf_layers,
                           sheaf_map=args.sheaf_map, sheaf_step=args.sheaf_step,
                           graph2_heads=args.graph2_heads, graph2_layers=args.graph2_layers,
-                          graph2_dropout=args.graph2_dropout, oracle_shift=args.oracle_shift).to(device)
+                          graph2_dropout=args.graph2_dropout, oracle_shift=args.oracle_shift,
+                          graph2_inter_modal=not args.graph2_no_inter_modal,
+                          graph2_per_modal=args.graph2_per_modal).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

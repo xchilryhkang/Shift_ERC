@@ -42,7 +42,8 @@ class BaselineModel(nn.Module):
                  heads=4, layers=1, window=4, link_prev_same=False,
                  graph_dropout=0.1, attn_dropout=0.0, init_lambda=0.5, learn_prior=True, gate=True,
                  graph2='none', sheaf_d=4, sheaf_layers=2, sheaf_map='diag', sheaf_step=1.0,
-                 graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False):
+                 graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False,
+                 graph2_inter_modal=True, graph2_per_modal=False):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -66,10 +67,14 @@ class BaselineModel(nn.Module):
             if graph2 == 'sheaf':
                 self.emo = EmotionalSheafGraph(hidden_dim, n_modals=len(modals), d=sheaf_d,
                                                layers=sheaf_layers, map_type=sheaf_map,
-                                               dropout=graph2_dropout, step_size=sheaf_step)
+                                               dropout=graph2_dropout, step_size=sheaf_step,
+                                               inter_modal=graph2_inter_modal,
+                                               per_modal=graph2_per_modal)
             elif graph2 == 'gat':
                 self.emo = EmotionalGATGraph(hidden_dim, n_modals=len(modals), heads=graph2_heads,
-                                             layers=graph2_layers, dropout=graph2_dropout)
+                                             layers=graph2_layers, dropout=graph2_dropout,
+                                             inter_modal=graph2_inter_modal,
+                                             per_modal=graph2_per_modal)
             else:
                 raise ValueError(f'unknown graph2: {graph2}')
             self.ln1 = nn.LayerNorm(hidden_dim)
