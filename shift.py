@@ -73,11 +73,27 @@ class ShiftHead(nn.Module):
     """
 
     def __init__(self, hidden_dim, dropout=0.1, n_pol=3, depth=0, emo_dim=None,
-                 compare='full'):
+                 compare='full', mode='pair'):
+        """
+        mode = 'pair'     : only the pairwise head (original).
+        mode = 'polarity' : only a per-utterance polarity head. A shift is then
+                            pol(zeta) != pol(i), which is transitive by construction:
+                            the pairwise head can claim u1~u3, u3~u5 but u1!~u5, and blocks
+                            built from such predictions contradict themselves.
+        mode = 'both'     : both heads. The pairwise head is pulled towards the outer product
+                            P_pol(zeta) (x) P_pol(i) by a consistency KL, so it keeps its view
+                            of the relation between two utterances while staying transitive.
+        """
         super().__init__()
-        assert compare in ('cat', 'full')
-        self.n_pol, self.depth, self.compare = n_pol, depth, compare
+        assert compare in ('cat', 'full') and mode in ('pair', 'polarity', 'both')
+        self.n_pol, self.depth, self.compare, self.mode = n_pol, depth, compare, mode
         d = emo_dim or hidden_dim // 2
+        if mode in ('polarity', 'both'):
+            self.pol_fc = nn.Sequential(nn.Dropout(dropout),
+                                        nn.Linear(hidden_dim, d), nn.ReLU(),
+                                        nn.Linear(d, n_pol))
+        if mode == 'polarity':
+            return                                             # no pairwise branch at all
 
         if depth == 0:
             self.fc = nn.Sequential(nn.Dropout(dropout), nn.Linear(2 * hidden_dim, n_pol ** 2))
@@ -91,18 +107,48 @@ class ShiftHead(nn.Module):
         n_part = 2 if compare == 'cat' else 4
         self.fc = nn.Sequential(nn.Dropout(dropout), nn.Linear(n_part * d, n_pol ** 2))
 
+    @staticmethod
+    def _gather_pairs(h, prev):
+        """h [B, T, D] -> (source, target), each [B, T, 2, D]."""
+        z_i = h.unsqueeze(2).expand(-1, -1, 2, -1)
+        z_s = torch.gather(z_i, 1, prev.unsqueeze(-1).expand(-1, -1, -1, h.size(-1)))
+        return z_s, z_i
+
+    def pair_from_polarity(self, pol_logits, prev):
+        """Outer product of the two endpoint polarities -> [B, T, 2, n_pol^2] log-probs."""
+        lp = pol_logits.log_softmax(-1)                        # [B, T, n_pol]
+        lp_s, lp_i = self._gather_pairs(lp, prev)              # [B, T, 2, n_pol]
+        return (lp_s.unsqueeze(-1) + lp_i.unsqueeze(-2)).flatten(-2)   # log P(zeta) + log P(i)
+
     def forward(self, h, prev):
-        """h [B, T, H], prev [B, T, 2] -> logits [B, T, 2, 9]"""
-        if self.depth > 0:
-            h = self.proj(h)                                   # [B, T, d]
-        D = h.size(-1)
-        z_i = h.unsqueeze(2).expand(-1, -1, 2, -1)             # target
-        z_s = torch.gather(z_i, 1, prev.unsqueeze(-1).expand(-1, -1, -1, D))   # source
+        """
+        h [B, T, H], prev [B, T, 2]
+        -> logits [B, T, 2, n_pol^2], pol_logits [B, T, n_pol] or None
+        """
+        pol_logits = self.pol_fc(h) if self.mode in ('polarity', 'both') else None
+        if self.mode == 'polarity':
+            return self.pair_from_polarity(pol_logits, prev), pol_logits
+
+        x = self.proj(h) if self.depth > 0 else h
+        z_s, z_i = self._gather_pairs(x, prev)
         if self.depth == 0 or self.compare == 'cat':
             feat = torch.cat([z_s, z_i], -1)
         else:
             feat = torch.cat([z_s, z_i, z_i - z_s, z_s * z_i], -1)
-        return self.fc(feat)
+        return self.fc(feat), pol_logits
+
+    def consistency_loss(self, logits, pol_logits, prev, valid):
+        """KL( P_pair || P_pol(zeta) (x) P_pol(i) ) over the valid pairs."""
+        tgt = self.pair_from_polarity(pol_logits, prev)        # log-probs [B, T, 2, n_pol^2]
+        kl = F.kl_div(tgt, logits.log_softmax(-1), log_target=True, reduction='none').sum(-1)
+        return kl[valid].mean() if valid.any() else logits.sum() * 0
+
+    @staticmethod
+    def polarity_loss(pol_logits, labels, pol, umask, weight=None):
+        """Cross-entropy of the per-utterance polarity head."""
+        y = pol[labels.clamp(min=0)].masked_fill(~umask.bool(), -100)
+        return F.cross_entropy(pol_logits.reshape(-1, pol_logits.size(-1)), y.reshape(-1),
+                               weight=weight, ignore_index=-100)
 
     @staticmethod
     def loss(logits, y, weight=None):

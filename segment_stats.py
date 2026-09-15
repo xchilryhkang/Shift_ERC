@@ -106,6 +106,11 @@ if __name__ == '__main__':
     ap.add_argument('--heads', type=int, default=4)
     ap.add_argument('--window', type=int, default=4)
     ap.add_argument('--modals', default='tav')
+    ap.add_argument('--link_prev_same', action='store_true')
+    ap.add_argument('--shift_depth', type=int, default=0)
+    ap.add_argument('--shift_emo_dim', type=int, default=None)
+    ap.add_argument('--shift_compare', default='full', choices=['cat', 'full'])
+    ap.add_argument('--shift_mode', default='pair', choices=['pair', 'polarity', 'both'])
     ap.add_argument('--no-cuda', action='store_true')
     args = ap.parse_args()
 
@@ -120,7 +125,10 @@ if __name__ == '__main__':
 
     model = BaselineModel(1024, 342, D_a, n_classes=n_cls, hidden_dim=args.hidden_dim, dropout=0.0,
                           modals=args.modals, dataset=args.Dataset, use_graph=True, use_shift=True,
-                          heads=args.heads, layers=args.layers, window=args.window).to(device).eval()
+                          heads=args.heads, layers=args.layers, window=args.window,
+                          link_prev_same=args.link_prev_same, shift_depth=args.shift_depth,
+                          shift_emo_dim=args.shift_emo_dim, shift_compare=args.shift_compare,
+                          shift_mode=args.shift_mode).to(device).eval()
     if args.checkpoint:
         sd = torch.load(args.checkpoint, map_location=device)
         missing = model.load_state_dict(sd, strict=False)
@@ -135,7 +143,7 @@ if __name__ == '__main__':
         for data in loader:
             textf, visuf, acouf, qmask, umask, label = [d.to(device) for d in data]
             qmask = qmask.permute(1, 0, 2)
-            _, _, _, shift_logits = model(textf, visuf, acouf, umask, qmask, None)
+            _, _, _, shift_logits, _ = model(textf, visuf, acouf, umask, qmask, None)
             prev, valid = build_shift_pairs(qmask, umask)
             sp_pred = predict_shift(shift_logits)
             sp_orac = oracle_shift(label, prev, valid, pol)

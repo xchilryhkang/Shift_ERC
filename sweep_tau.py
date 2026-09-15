@@ -51,6 +51,7 @@ if __name__ == '__main__':
     ap.add_argument('--shift_depth', type=int, default=0)
     ap.add_argument('--shift_emo_dim', type=int, default=None)
     ap.add_argument('--shift_compare', default='full', choices=['cat', 'full'])
+    ap.add_argument('--shift_mode', default='pair', choices=['pair','polarity','both'])
     ap.add_argument('--modals', default='tav')
     ap.add_argument('--no-cuda', action='store_true')
     args = ap.parse_args()
@@ -69,7 +70,8 @@ if __name__ == '__main__':
                           heads=args.heads, layers=args.layers, window=args.window,
                           link_prev_same=args.link_prev_same, shift_depth=args.shift_depth,
                           shift_emo_dim=args.shift_emo_dim,
-                          shift_compare=args.shift_compare).to(device).eval()
+                          shift_compare=args.shift_compare,
+                          shift_mode=args.shift_mode).to(device).eval()
     miss = model.load_state_dict(torch.load(args.checkpoint, map_location=device), strict=False)
     print(f'checkpoint loaded ({len(miss.missing_keys)} missing, '
           f'{len(miss.unexpected_keys)} unexpected keys)')
@@ -81,7 +83,7 @@ if __name__ == '__main__':
         for data in loader:
             textf, visuf, acouf, qmask, umask, label = [d.to(device) for d in data]
             qmask = qmask.permute(1, 0, 2)
-            _, _, _, logits = model(textf, visuf, acouf, umask, qmask, None)
+            _, _, _, logits, _ = model(textf, visuf, acouf, umask, qmask, None)
             prev, valid = build_shift_pairs(qmask, umask)
             p = pol[label.clamp(min=0)]
             y_bin = (torch.gather(p.unsqueeze(-1).expand(-1, -1, 2), 1, prev) != p.unsqueeze(-1))

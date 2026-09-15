@@ -44,7 +44,8 @@ class BaselineModel(nn.Module):
                  graph2='none', sheaf_d=4, sheaf_layers=2, sheaf_map='diag', sheaf_step=1.0,
                  graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False,
                  graph2_inter_modal=True, graph2_per_modal=False,
-                 shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None):
+                 shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
+                 shift_mode='pair'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -60,7 +61,8 @@ class BaselineModel(nn.Module):
                                               init_lambda=init_lambda, learn_prior=learn_prior, gate=gate)
         if use_shift:
             self.shift = ShiftHead(hidden_dim, dropout, depth=shift_depth,
-                                   emo_dim=shift_emo_dim, compare=shift_compare)
+                                   emo_dim=shift_emo_dim, compare=shift_compare,
+                                   mode=shift_mode)
             self.register_buffer('pol', polarity_map(dataset))
 
         self.graph2, self.oracle_shift, self.shift_tau = graph2, oracle_shift, shift_tau
@@ -91,10 +93,10 @@ class BaselineModel(nn.Module):
         hs = self.graph(x, qmask, umask) if self.use_graph else x
         h = sum(hs)                                                              # [B, T, H]
 
-        shift_logits = None
+        shift_logits = pol_logits = None
         if self.use_shift:
             prev, valid = build_shift_pairs(qmask, umask)
-            shift_logits = self.shift(h, prev)                                   # [B, T, 2, 9]
+            shift_logits, pol_logits = self.shift(h, prev)                       # [B, T, 2, 9]
 
         if self.graph2 != 'none' and not warmup:
             if self.oracle_shift:
@@ -110,7 +112,7 @@ class BaselineModel(nn.Module):
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
 
         logits = self.classifier(h)                                              # [B, T, C]
-        return F.log_softmax(logits, dim=-1), F.softmax(logits, dim=-1), h, shift_logits
+        return F.log_softmax(logits, dim=-1), F.softmax(logits, dim=-1), h, shift_logits, pol_logits
 
     def param_groups(self, lr, prior_lr, weight_decay):
         """Prior scalars (b_rel, theta) need a much larger lr and no weight decay."""

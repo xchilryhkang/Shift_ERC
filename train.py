@@ -49,7 +49,7 @@ def get_loaders(dataset_cls, path, batch_size=32, valid=0.1, num_workers=0, pin_
 
 
 def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False,
-                        w_shift=0.0, warmup=False):
+                        w_shift=0.0, warmup=False, w_pol=0.0, w_cons=0.0):
     losses, preds, labels, masks = [], [], [], []
     s_preds, s_labels, b_preds = [], [], []
 
@@ -66,8 +66,8 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
             qmask = qmask.permute(1, 0, 2)                       # [B, T, n_speakers]
             lengths = umask.sum(dim=1).long()                    # [B]
 
-            log_prob, prob, _, shift_logits = model(textf, visuf, acouf, umask, qmask, lengths,
-                                                    warmup=warmup, labels=label)
+            log_prob, prob, _, shift_logits, pol_logits = model(
+                textf, visuf, acouf, umask, qmask, lengths, warmup=warmup, labels=label)
 
             lp_ = log_prob.view(-1, log_prob.size(2))
             labels_ = label.view(-1)
@@ -77,6 +77,12 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
                 prev, valid = build_shift_pairs(qmask, umask)
                 y_shift = shift_labels(label, prev, valid, model.pol)
                 loss = loss + w_shift * model.shift.loss(shift_logits, y_shift)
+                if pol_logits is not None:
+                    loss = loss + w_pol * model.shift.polarity_loss(pol_logits, label,
+                                                                    model.pol, umask)
+                    if model.shift.mode == 'both':
+                        loss = loss + w_cons * model.shift.consistency_loss(
+                            shift_logits, pol_logits, prev, valid)
                 keep = y_shift.view(-1) != -100
                 s_preds.append(shift_logits.reshape(-1, 9).argmax(-1)[keep].cpu().numpy())
                 s_labels.append(y_shift.view(-1)[keep].cpu().numpy())
@@ -167,6 +173,14 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_per_modal', action='store_true',
                         help='graph 2 only: separate weights per modality '
                              '(needs --graph2_no_inter_modal)')
+    parser.add_argument('--shift_mode', default='pair', choices=['pair', 'polarity', 'both'],
+                        help="'polarity' predicts one polarity per utterance (transitive by "
+                             "construction); 'both' keeps the pairwise head and ties it to the "
+                             'polarity head with a consistency KL')
+    parser.add_argument('--w_pol', type=float, default=0.3,
+                        help='weight of the per-utterance polarity loss')
+    parser.add_argument('--w_cons', type=float, default=0.1,
+                        help='weight of the pair/polarity consistency KL (only --shift_mode both)')
     parser.add_argument('--shift_tau', type=float, default=None,
                         help='threshold on c^es = P(no shift) instead of argmax over the 9 '
                              'classes; 0.5 is balanced, larger flags more shifts')
@@ -202,7 +216,8 @@ if __name__ == '__main__':
                           graph2_inter_modal=not args.graph2_no_inter_modal,
                           graph2_per_modal=args.graph2_per_modal,
                           shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
-                          shift_compare=args.shift_compare, shift_tau=args.shift_tau).to(device)
+                          shift_compare=args.shift_compare, shift_tau=args.shift_tau,
+                          shift_mode=args.shift_mode).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -229,9 +244,11 @@ if __name__ == '__main__':
     for e in range(args.epochs):
         start_time = time.time()
         warm = args.graph2 != 'none' and e < args.warmup_epochs
-        tr = train_or_eval_model(model, loss_function, train_loader, optimizer, True, args.w_shift, warm)
+        tr = train_or_eval_model(model, loss_function, train_loader, optimizer, True,
+                                 args.w_shift, warm, args.w_pol, args.w_cons)
         te = train_or_eval_model(model, loss_function, test_loader, train=False,
-                                 w_shift=args.w_shift, warmup=warm)
+                                 w_shift=args.w_shift, warmup=warm,
+                                 w_pol=args.w_pol, w_cons=args.w_cons)
         scheduler.step()
 
         all_test_fscore.append(te['fscore'])
