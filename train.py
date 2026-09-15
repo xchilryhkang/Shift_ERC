@@ -129,7 +129,9 @@ if __name__ == '__main__':
     parser.add_argument('--use_graph', action='store_true', help='enable the semantic context graph')
     parser.add_argument('--heads', type=int, default=4)
     parser.add_argument('--layers', type=int, default=1)
-    parser.add_argument('--window', type=int, default=4, help='context window d (past only)')
+    parser.add_argument('--window', type=int, default=4,
+                        help='context window d for graph 1 (past only); -1 = the whole past, '
+                             'so only the learned decay lambda limits the receptive field')
     parser.add_argument('--link_prev_same', action='store_true', help='always keep the p_u(i) edge')
     parser.add_argument('--graph_dropout', type=float, default=0.1)
     parser.add_argument('--attn_dropout', type=float, default=0.0)

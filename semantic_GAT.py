@@ -51,6 +51,8 @@ def build_relation_graph(qmask, umask, n_modals, window=4, link_prev_same=False)
     Returns
         rel : [B, N, N] long, rel[b, i, j] = relation of edge j -> i (REL_NONE if no edge)
         phi : [N, N]    float, phi[i, j] = max(Delta - 1, 0) for context edges, 0 otherwise
+    window = -1 keeps every past utterance of the dialogue, so the distance decay
+    -lambda * phi becomes the only thing limiting the receptive field.
     Node index n = m * T + t  (modality block, then time).
     Row = target (query), column = source (key).
     """
@@ -66,7 +68,9 @@ def build_relation_graph(qmask, umask, n_modals, window=4, link_prev_same=False)
 
     is_self = same_mod & same_time
     is_mod = (~same_mod) & same_time
-    in_window = same_mod & (delta >= 1) & (delta <= window)          # past only
+    in_window = same_mod & (delta >= 1)                              # past only
+    if window >= 0:
+        in_window = in_window & (delta <= window)
 
     valid = umask.bool()                                             # [B, T]
     key_valid = valid[:, t_idx][:, None, :]                          # [B, 1, N]
