@@ -44,7 +44,7 @@ class BaselineModel(nn.Module):
                  graph2='none', sheaf_d=4, sheaf_layers=2, sheaf_map='diag', sheaf_step=1.0,
                  graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False,
                  graph2_inter_modal=True, graph2_per_modal=False,
-                 shift_depth=0, shift_emo_dim=None, shift_compare='full'):
+                 shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -63,7 +63,7 @@ class BaselineModel(nn.Module):
                                    emo_dim=shift_emo_dim, compare=shift_compare)
             self.register_buffer('pol', polarity_map(dataset))
 
-        self.graph2, self.oracle_shift = graph2, oracle_shift
+        self.graph2, self.oracle_shift, self.shift_tau = graph2, oracle_shift, shift_tau
         if graph2 != 'none':
             assert use_shift, "graph2 needs the shift head to build the partition (--use_shift)"
             if graph2 == 'sheaf':
@@ -104,7 +104,7 @@ class BaselineModel(nn.Module):
                 sp = (torch.gather(p.unsqueeze(-1).expand(-1, -1, 2), 1, prev) !=
                       p.unsqueeze(-1)) & valid
             else:
-                sp = predict_shift(shift_logits.detach())                        # [B, T, 2] bool
+                sp = predict_shift(shift_logits.detach(), tau=self.shift_tau)   # [B, T, 2] bool
             h2 = sum(self.emo(x, qmask, umask, sp, prev, valid))
             a = torch.sigmoid(self.alpha)
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)

@@ -46,10 +46,29 @@ N_REL = 4
 # ---------------------------------------------------------------------------
 # Shift predictions -> partition
 # ---------------------------------------------------------------------------
-def predict_shift(shift_logits, n_pol=3):
-    """[B, T, 2, n_pol^2] -> [B, T, 2] bool, True when start polarity != target polarity."""
-    c = shift_logits.argmax(-1)
-    return (c // n_pol) != (c % n_pol)
+def consistency(shift_logits, n_pol=3):
+    """[B, T, 2, n_pol^2] -> [B, T, 2], c^es = P(no shift) = sum of the diagonal entries."""
+    p = shift_logits.softmax(-1).view(*shift_logits.shape[:-1], n_pol, n_pol)
+    return p.diagonal(dim1=-2, dim2=-1).sum(-1)
+
+
+def predict_shift(shift_logits, n_pol=3, tau=None):
+    """
+    [B, T, 2, n_pol^2] -> [B, T, 2] bool.
+
+    tau is None : argmax over the n_pol^2 classes, then check whether it is off-diagonal.
+                  This is biased towards "no shift": the no-shift classes only have to beat
+                  the single strongest rival, while the n_pol^2 - n_pol shift classes split
+                  their mass among themselves.
+    tau given   : shift <=> c^es < tau, i.e. an explicit threshold on P(no shift).
+                  tau = 0.5 is the balanced rule; larger tau flags more shifts, so blocks get
+                  shorter and purer. tau is not learned, so it can be swept on a trained
+                  checkpoint without retraining.
+    """
+    if tau is None:
+        c = shift_logits.argmax(-1)
+        return (c // n_pol) != (c % n_pol)
+    return consistency(shift_logits, n_pol) < tau
 
 
 def block_ids(shift_pred, qmask, prev, valid):

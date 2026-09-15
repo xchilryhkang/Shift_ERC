@@ -14,6 +14,7 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from dataloader import IEMOCAPDataset, MELDDataset
 from model import BaselineModel, MaskedNLLLoss
 from shift import build_shift_pairs, shift_labels
+from sheaf import predict_shift
 from vision import confuPLT
 
 
@@ -50,7 +51,7 @@ def get_loaders(dataset_cls, path, batch_size=32, valid=0.1, num_workers=0, pin_
 def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False,
                         w_shift=0.0, warmup=False):
     losses, preds, labels, masks = [], [], [], []
-    s_preds, s_labels = [], []
+    s_preds, s_labels, b_preds = [], [], []
 
     assert not train or optimizer is not None
     device = next(model.parameters()).device
@@ -79,6 +80,9 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
                 keep = y_shift.view(-1) != -100
                 s_preds.append(shift_logits.reshape(-1, 9).argmax(-1)[keep].cpu().numpy())
                 s_labels.append(y_shift.view(-1)[keep].cpu().numpy())
+                # the binary decision the partition actually consumes: obeys --shift_tau
+                b_preds.append(predict_shift(shift_logits, tau=model.shift_tau)
+                               .reshape(-1)[keep].cpu().numpy())
 
             pred_ = torch.argmax(prob.view(-1, prob.size(2)), 1)
             preds.append(pred_.cpu().numpy())
@@ -104,7 +108,8 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
         out['shift_f1'] = round(f1_score(sl, sp, average='macro', zero_division=0) * 100, 2)
         out['shift_acc'] = round(accuracy_score(sl, sp) * 100, 2)
         # the partition only consumes the binary decision, so report that too
-        bp, bl = (sp // 3) != (sp % 3), (sl // 3) != (sl % 3)
+        bl = (sl // 3) != (sl % 3)
+        bp = np.concatenate(b_preds)
         out['shift_bacc'] = round(accuracy_score(bl, bp) * 100, 2)
         out['shift_bf1'] = round(f1_score(bl, bp, zero_division=0) * 100, 2)
         out['shift_rate'] = round(100 * bl.mean(), 1)
@@ -162,6 +167,9 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_per_modal', action='store_true',
                         help='graph 2 only: separate weights per modality '
                              '(needs --graph2_no_inter_modal)')
+    parser.add_argument('--shift_tau', type=float, default=None,
+                        help='threshold on c^es = P(no shift) instead of argmax over the 9 '
+                             'classes; 0.5 is balanced, larger flags more shifts')
     parser.add_argument('--oracle_shift', action='store_true',
                         help='build the partition from ground-truth shifts (ceiling experiment)')
     parser.add_argument('--warmup_epochs', type=int, default=5,
@@ -194,7 +202,7 @@ if __name__ == '__main__':
                           graph2_inter_modal=not args.graph2_no_inter_modal,
                           graph2_per_modal=args.graph2_per_modal,
                           shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
-                          shift_compare=args.shift_compare).to(device)
+                          shift_compare=args.shift_compare, shift_tau=args.shift_tau).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
