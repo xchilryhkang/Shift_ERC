@@ -43,7 +43,8 @@ class BaselineModel(nn.Module):
                  graph_dropout=0.1, attn_dropout=0.0, init_lambda=0.5, learn_prior=True, gate=True,
                  graph2='none', sheaf_d=4, sheaf_layers=2, sheaf_map='diag', sheaf_step=1.0,
                  graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False,
-                 graph2_inter_modal=True, graph2_per_modal=False):
+                 graph2_inter_modal=True, graph2_per_modal=False,
+                 shift_depth=0, shift_emo_dim=None, shift_compare='full'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -58,7 +59,8 @@ class BaselineModel(nn.Module):
                                               dropout=graph_dropout, attn_dropout=attn_dropout,
                                               init_lambda=init_lambda, learn_prior=learn_prior, gate=gate)
         if use_shift:
-            self.shift = ShiftHead(hidden_dim, dropout)
+            self.shift = ShiftHead(hidden_dim, dropout, depth=shift_depth,
+                                   emo_dim=shift_emo_dim, compare=shift_compare)
             self.register_buffer('pol', polarity_map(dataset))
 
         self.graph2, self.oracle_shift = graph2, oracle_shift

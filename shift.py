@@ -59,23 +59,55 @@ def shift_labels(labels, prev, valid, pol):
 
 
 class ShiftHead(nn.Module):
-    """node features -> 9-way shift logits for the two adjacent pairs of every utterance."""
+    """
+    node features -> 9-way shift logits for the two adjacent pairs of every utterance.
 
-    def __init__(self, hidden_dim, dropout=0.1, n_pol=3):
+    depth = 0 : one linear layer on [h_zeta || h_i]                    (original)
+    depth >= 1: project both endpoints into a shared emotion space,
+                    z = ReLU(W_emo h)                        (repeated `depth` times)
+                then classify a comparison vector. `compare` picks what goes in:
+                    'cat'  -> [z_zeta || z_i]
+                    'full' -> [z_zeta || z_i || z_i - z_zeta || z_zeta * z_i]
+    A shift is a comparison, and a single linear layer on a concatenation represents a
+    difference poorly, which is what `full` is for.
+    """
+
+    def __init__(self, hidden_dim, dropout=0.1, n_pol=3, depth=0, emo_dim=None,
+                 compare='full'):
         super().__init__()
-        self.n_pol = n_pol
-        self.fc = nn.Sequential(nn.Dropout(dropout), nn.Linear(2 * hidden_dim, n_pol * n_pol))
+        assert compare in ('cat', 'full')
+        self.n_pol, self.depth, self.compare = n_pol, depth, compare
+        d = emo_dim or hidden_dim // 2
+
+        if depth == 0:
+            self.fc = nn.Sequential(nn.Dropout(dropout), nn.Linear(2 * hidden_dim, n_pol ** 2))
+            return
+
+        proj, dim = [], hidden_dim
+        for _ in range(depth):
+            proj += [nn.Dropout(dropout), nn.Linear(dim, d), nn.ReLU()]
+            dim = d
+        self.proj = nn.Sequential(*proj)                       # shared by both endpoints
+        n_part = 2 if compare == 'cat' else 4
+        self.fc = nn.Sequential(nn.Dropout(dropout), nn.Linear(n_part * d, n_pol ** 2))
 
     def forward(self, h, prev):
         """h [B, T, H], prev [B, T, 2] -> logits [B, T, 2, 9]"""
-        H = h.size(-1)
-        src = torch.gather(h.unsqueeze(2).expand(-1, -1, 2, -1), 1,
-                           prev.unsqueeze(-1).expand(-1, -1, -1, H))     # [B, T, 2, H]
-        return self.fc(torch.cat([src, h.unsqueeze(2).expand(-1, -1, 2, -1)], -1))
+        if self.depth > 0:
+            h = self.proj(h)                                   # [B, T, d]
+        D = h.size(-1)
+        z_i = h.unsqueeze(2).expand(-1, -1, 2, -1)             # target
+        z_s = torch.gather(z_i, 1, prev.unsqueeze(-1).expand(-1, -1, -1, D))   # source
+        if self.depth == 0 or self.compare == 'cat':
+            feat = torch.cat([z_s, z_i], -1)
+        else:
+            feat = torch.cat([z_s, z_i, z_i - z_s, z_s * z_i], -1)
+        return self.fc(feat)
 
     @staticmethod
-    def loss(logits, y):
-        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), ignore_index=-100)
+    def loss(logits, y, weight=None):
+        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1),
+                               weight=weight, ignore_index=-100)
 
     def consistency(self, logits):
         """P(no shift) = sum of the diagonal entries (m -> m). [B, T, 2]"""

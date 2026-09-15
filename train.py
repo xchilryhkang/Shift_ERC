@@ -103,6 +103,11 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
         sp, sl = np.concatenate(s_preds), np.concatenate(s_labels)
         out['shift_f1'] = round(f1_score(sl, sp, average='macro', zero_division=0) * 100, 2)
         out['shift_acc'] = round(accuracy_score(sl, sp) * 100, 2)
+        # the partition only consumes the binary decision, so report that too
+        bp, bl = (sp // 3) != (sp % 3), (sl // 3) != (sl % 3)
+        out['shift_bacc'] = round(accuracy_score(bl, bp) * 100, 2)
+        out['shift_bf1'] = round(f1_score(bl, bp, zero_division=0) * 100, 2)
+        out['shift_rate'] = round(100 * bl.mean(), 1)
     return out
 
 
@@ -144,6 +149,12 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_heads', type=int, default=4, help='only for --graph2 gat')
     parser.add_argument('--graph2_layers', type=int, default=1, help='only for --graph2 gat')
     parser.add_argument('--graph2_dropout', type=float, default=0.1)
+    parser.add_argument('--shift_depth', type=int, default=0,
+                        help='0 = single linear layer (original); >=1 adds an emotion-space MLP')
+    parser.add_argument('--shift_emo_dim', type=int, default=None,
+                        help='width of the emotion space (default hidden_dim // 2)')
+    parser.add_argument('--shift_compare', default='full', choices=['cat', 'full'],
+                        help="'full' adds the difference and the product of the two endpoints")
     parser.add_argument('--graph2_no_inter_modal', action='store_true',
                         help='graph 2 only: drop inter-modal edges (one sub-graph per modality)')
     parser.add_argument('--graph2_per_modal', action='store_true',
@@ -179,7 +190,9 @@ if __name__ == '__main__':
                           graph2_heads=args.graph2_heads, graph2_layers=args.graph2_layers,
                           graph2_dropout=args.graph2_dropout, oracle_shift=args.oracle_shift,
                           graph2_inter_modal=not args.graph2_no_inter_modal,
-                          graph2_per_modal=args.graph2_per_modal).to(device)
+                          graph2_per_modal=args.graph2_per_modal,
+                          shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
+                          shift_compare=args.shift_compare).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -220,7 +233,8 @@ if __name__ == '__main__':
                'test_loss: {}, test_acc: {}, test_fscore: {}').format(
             e + 1, tr['loss'], tr['acc'], tr['fscore'], te['loss'], te['acc'], te['fscore'])
         if te['shift_f1'] is not None:
-            msg += ', shift_acc: {}, shift_mF1: {}'.format(te['shift_acc'], te['shift_f1'])
+            msg += ', shift_acc: {}, shift_mF1: {}, bin_acc: {}, bin_F1: {}'.format(
+                te['shift_acc'], te['shift_f1'], te['shift_bacc'], te['shift_bf1'])
         if args.graph2 != 'none':
             msg += ', alpha: {:.3f}'.format(torch.sigmoid(model.alpha).item()) + (' [warmup]' if warm else '')
         print(msg + ', time: {} sec'.format(round(time.time() - start_time, 2)))
