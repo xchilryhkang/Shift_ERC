@@ -184,11 +184,19 @@ if __name__ == '__main__':
     parser.add_argument('--shift_tau', type=float, default=None,
                         help='threshold on c^es = P(no shift) instead of argmax over the 9 '
                              'classes; 0.5 is balanced, larger flags more shifts')
+    parser.add_argument('--soft_weight', action='store_true',
+                        help='graph 2 (gat): weight every edge by the product of c^es along '
+                             'the chain, in log space, instead of treating all edges of a block '
+                             'equally; differentiable, so the main loss reaches the shift head')
+    parser.add_argument('--init_mu', type=float, default=0.1,
+                        help='initial strength of the soft weight (mu = 0 is the hard partition)')
     parser.add_argument('--oracle_shift', action='store_true',
                         help='build the partition from ground-truth shifts (ceiling experiment)')
     parser.add_argument('--warmup_epochs', type=int, default=5,
                         help='epochs with graph2 disabled, while the shift head is still random')
     args = parser.parse_args()
+    if args.soft_weight and args.graph2 != 'gat':
+        parser.error('--soft_weight is only implemented for --graph2 gat')
     print(args)
     seed_everything(args.seed)
 
@@ -217,7 +225,8 @@ if __name__ == '__main__':
                           graph2_per_modal=args.graph2_per_modal,
                           shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
                           shift_compare=args.shift_compare, shift_tau=args.shift_tau,
-                          shift_mode=args.shift_mode).to(device)
+                          shift_mode=args.shift_mode, soft_weight=args.soft_weight,
+                          init_mu=args.init_mu).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -263,7 +272,10 @@ if __name__ == '__main__':
             msg += ', shift_acc: {}, shift_mF1: {}, bin_acc: {}, bin_F1: {}'.format(
                 te['shift_acc'], te['shift_f1'], te['shift_bacc'], te['shift_bf1'])
         if args.graph2 != 'none':
-            msg += ', alpha: {:.3f}'.format(torch.sigmoid(model.alpha).item()) + (' [warmup]' if warm else '')
+            msg += ', alpha: {:.3f}'.format(torch.sigmoid(model.alpha).item())
+            if args.soft_weight:
+                msg += ', mu: {:.3f}'.format(model.emo.mu.item())
+            msg += ' [warmup]' if warm else ''
         print(msg + ', time: {} sec'.format(round(time.time() - start_time, 2)))
 
         if args.use_graph and not args.freeze_prior and (e + 1) % 10 == 0:

@@ -35,6 +35,8 @@ Conventions match the rest of the repo:
     features : list of M tensors [B, T, H]
     qmask    : [B, T, n_speakers] one-hot,  umask : [B, T]
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -98,6 +100,42 @@ def block_ids(shift_pred, qmask, prev, valid):
     time_blk = torch.cumsum(cut_time.long(), dim=1)
 
     return torch.stack([spk_blk, time_blk], dim=-1)
+
+
+def soft_log_weight(cons, qmask, prev, valid):
+    """
+    Soft edge weight from the shift head, in log space:
+
+        log pi(j -> i) = sum_{k on the chain from j to i} log c^es_k
+
+    i.e. the product of the "no shift" probabilities along the chain, which is Eq. 24 of ESDCM.
+    Hard cutting has to choose between long dirty blocks and isolated utterances; this instead
+    keeps every edge of a block and lets a doubtful one weigh less. It is also differentiable,
+    so the main loss can reach the shift head, which argmax cannot do.
+
+    cons : [B, T, 2] = c^es, from ShiftHead.consistency
+    Returns lw [B, T, T], lw[b, i, j] = log pi for the edge j -> i, on utterance nodes.
+    Computed per chain as a cumulative sum, then the two chains are combined with a max
+    (the union means one chain showing continuity is enough).
+    """
+    B, T, _ = prev.shape
+    dev = prev.device
+    t = torch.arange(T, device=dev)
+    lc = cons.clamp_min(1e-6).log()                                       # [B, T, 2]
+
+    # speaker chain: cumulative sum along each speaker's own turns
+    lc_spk = torch.where(valid[..., 0], lc[..., 0], torch.zeros_like(lc[..., 0]))
+    cum_spk = (torch.cumsum(lc_spk.unsqueeze(-1) * qmask, dim=1) * qmask).sum(-1)   # [B, T]
+
+    # time chain: the adjacent pair is whichever channel points at i-1
+    is_adj = (prev == (t[None, :, None] - 1)) & valid
+    lc_adj = (lc * is_adj.float()).sum(-1)                                # 0 when no adjacent pair
+    cum_time = torch.cumsum(lc_adj, dim=1)
+
+    # log pi(j -> i) = cum(i) - cum(j); >= -inf, and 0 for j == i
+    lw_spk = cum_spk[:, :, None] - cum_spk[:, None, :]
+    lw_time = cum_time[:, :, None] - cum_time[:, None, :]
+    return torch.maximum(lw_spk, lw_time).clamp(max=0.0)                  # [B, T, T]
 
 
 def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_modal=True):
@@ -264,35 +302,57 @@ class EmotionalGATGraph(nn.Module):
     """
 
     def __init__(self, hidden_dim, n_modals=3, heads=4, layers=1, dropout=0.1,
-                 inter_modal=True, per_modal=False):
+                 inter_modal=True, per_modal=False, soft_weight=False, init_mu=0.1):
         super().__init__()
         from semantic_GAT import StructuralPriorGATLayer
         if per_modal:
             assert not inter_modal, 'per-modality weights need inter_modal=False'
         self.n_modals, self.dropout = n_modals, dropout
         self.inter_modal, self.per_modal = inter_modal, per_modal
+        self.soft_weight = soft_weight
+        if soft_weight:
+            # log pi is added to the attention energy with a learnable strength mu >= 0.
+            # mu = 0 recovers the hard partition; large mu approaches hard cutting again.
+            theta0 = math.log(math.expm1(init_mu)) if init_mu > 0 else -20.0
+            self.theta_mu = nn.Parameter(torch.tensor(theta0))
         mk = lambda: nn.ModuleList([
             StructuralPriorGATLayer(hidden_dim, hidden_dim, heads=heads, init_lambda=0.0,
                                     learn_prior=False) for _ in range(layers)])
         self.layers = nn.ModuleList([mk() for _ in range(n_modals)]) if per_modal else mk()
 
-    def forward(self, features, qmask, umask, shift_pred, prev, valid):
+    @property
+    def mu(self):
+        return F.softplus(self.theta_mu) if self.soft_weight else None
+
+    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
         B, T, H = features[0].shape
         rel, _ = build_segment_edges(qmask, umask, shift_pred, prev, valid, self.n_modals,
                                      self.inter_modal)
         rel = rel + 1                      # semantic_GAT: 0 = no edge, 1..4 = self/mod/same/cross
         phi = torch.zeros(rel.size(1), rel.size(2), device=rel.device)
+
+        bias_u = None                      # [B, T, T] log weight on utterance pairs
+        if self.soft_weight:
+            assert cons is not None, 'soft_weight needs c^es (do not detach it)'
+            bias_u = self.mu * soft_log_weight(cons, qmask, prev, valid)
+
         if self.per_modal:
             outs = []
             for m, stack in enumerate(self.layers):
                 sl = slice(m * T, (m + 1) * T)
                 xm, relm, phim = features[m], rel[:, sl, sl], phi[sl, sl]
                 for layer in stack:
-                    xm = xm + F.elu(F.dropout(layer(xm, relm, phim), self.dropout, self.training))
+                    xm = xm + F.elu(F.dropout(layer(xm, relm, phim, edge_bias=bias_u),
+                                              self.dropout, self.training))
                 outs.append(xm)
             return outs
 
+        bias = None
+        if bias_u is not None:             # lift [B, T, T] to [B, N, N]
+            t_idx = torch.arange(rel.size(1), device=rel.device) % T
+            bias = bias_u[:, t_idx][:, :, t_idx]
         x = torch.cat(features, dim=1)
         for layer in self.layers:
-            x = x + F.elu(F.dropout(layer(x, rel, phi), self.dropout, self.training))
+            x = x + F.elu(F.dropout(layer(x, rel, phi, edge_bias=bias),
+                                    self.dropout, self.training))
         return list(x.split(T, dim=1))

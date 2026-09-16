@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from semantic_GAT import SemanticContextGraph
 from shift import ShiftHead, build_shift_pairs, polarity_map, shift_labels
-from sheaf import EmotionalGATGraph, EmotionalSheafGraph, predict_shift
+from sheaf import EmotionalGATGraph, EmotionalSheafGraph, consistency, predict_shift
 
 
 class MaskedNLLLoss(nn.Module):
@@ -45,7 +45,7 @@ class BaselineModel(nn.Module):
                  graph2_heads=4, graph2_layers=1, graph2_dropout=0.1, oracle_shift=False,
                  graph2_inter_modal=True, graph2_per_modal=False,
                  shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
-                 shift_mode='pair'):
+                 shift_mode='pair', soft_weight=False, init_mu=0.1):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -78,7 +78,8 @@ class BaselineModel(nn.Module):
                 self.emo = EmotionalGATGraph(hidden_dim, n_modals=len(modals), heads=graph2_heads,
                                              layers=graph2_layers, dropout=graph2_dropout,
                                              inter_modal=graph2_inter_modal,
-                                             per_modal=graph2_per_modal)
+                                             per_modal=graph2_per_modal,
+                                             soft_weight=soft_weight, init_mu=init_mu)
             else:
                 raise ValueError(f'unknown graph2: {graph2}')
             self.ln1 = nn.LayerNorm(hidden_dim)
@@ -107,7 +108,10 @@ class BaselineModel(nn.Module):
                       p.unsqueeze(-1)) & valid
             else:
                 sp = predict_shift(shift_logits.detach(), tau=self.shift_tau)   # [B, T, 2] bool
-            h2 = sum(self.emo(x, qmask, umask, sp, prev, valid))
+            # the hard partition uses argmax (not differentiable anyway), but c^es must keep
+            # its gradient so the main loss can reach the shift head
+            cons = consistency(shift_logits) if getattr(self.emo, 'soft_weight', False) else None
+            h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons))
             a = torch.sigmoid(self.alpha)
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
 
@@ -117,7 +121,7 @@ class BaselineModel(nn.Module):
     def param_groups(self, lr, prior_lr, weight_decay):
         """Prior scalars (b_rel, theta) need a much larger lr and no weight decay."""
         named = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
-        is_prior = lambda n: n.endswith(('b_rel', 'theta', 'alpha'))
+        is_prior = lambda n: n.endswith(('b_rel', 'theta', 'alpha', 'theta_mu'))
         prior = [p for n, p in named if is_prior(n)]      # scalars: need a much larger lr
         rest = [p for n, p in named if not is_prior(n)]
         groups = [{'params': rest, 'lr': lr, 'weight_decay': weight_decay}]

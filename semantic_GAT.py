@@ -134,7 +134,7 @@ class StructuralPriorGATLayer(nn.Module):
         zero = self.b_rel.new_zeros(1, self.heads)
         return torch.cat([zero, zero, self.b_rel], dim=0)  # [5, heads]
 
-    def forward(self, x, rel, phi, return_attention=False):
+    def forward(self, x, rel, phi, return_attention=False, edge_bias=None):
         """x: [B, N, in_dim], rel: [B, N, N], phi: [N, N]"""
         B, N, _ = x.shape
         h = self.W(x).view(B, N, self.heads, self.C) # [B, N, H, C]
@@ -144,6 +144,8 @@ class StructuralPriorGATLayer(nn.Module):
         content = F.leaky_relu(s_dst[:, :, None, :] + s_src[:, None, :, :], self.negative_slope)
 
         prior = self.rel_bias_table()[rel] - self.lamda * phi[None, :, :, None] # [B, N, N, H]
+        if edge_bias is not None:            # extra log-space edge weight, e.g. the soft
+            prior = prior + edge_bias[..., None]   # segment weight (same for every head)
         energy = (content + prior).masked_fill((rel == REL_NONE)[..., None], float("-inf"))
 
         alpha = torch.softmax(energy, dim=2)
