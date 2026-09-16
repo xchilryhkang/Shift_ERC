@@ -171,25 +171,30 @@ class SemanticContextGraph(nn.Module):
             self.gate_in = nn.Linear(hidden_dim, hidden_dim)
             self.gate_out = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, features, qmask, umask, return_attention=False):
+    def forward(self, features, qmask, umask, return_attention=False, return_layers=False):
         assert len(features) == self.n_modals
         B, T, H = features[0].shape 
         rel, phi = build_relation_graph(qmask, umask, self.n_modals, self.window, self.link_prev_same)
 
         x0 = torch.cat(features, dim=1) # [B, M*T, H]
         x = F.dropout(x0, p=self.dropout, training=self.training)
-        attns = []
+        attns, per_layer = [], [x0]          # per_layer[0] is the input to the graph
         for layer in self.layers:
             out, a = layer(x, rel, phi, return_attention=True)
             x = x + F.elu(F.dropout(out, p=self.dropout, training=self.training))
             attns.append(a)
+            per_layer.append(x)
 
         if self.gate: 
             x = torch.sigmoid(self.gate_in(x0)) * x0 + torch.sigmoid(self.gate_out(x)) * x
+        per_layer.append(x)                  # after the gate
 
         outs = list(x.split(T, dim=1)) # M x [B, T, H]
-        if return_attention:
-            return outs, {"attention": attns, "relation": rel, "phi": phi}
+        if return_attention or return_layers:
+            info = {"attention": attns, "relation": rel, "phi": phi}
+            if return_layers:
+                info["layers"] = per_layer   # [input, after L1, ..., after Ln, after gate]
+            return outs, info
         return outs
 
 
