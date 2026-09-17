@@ -184,6 +184,10 @@ if __name__ == '__main__':
     parser.add_argument('--shift_tau', type=float, default=None,
                         help='threshold on c^es = P(no shift) instead of argmax over the 9 '
                              'classes; 0.5 is balanced, larger flags more shifts')
+    parser.add_argument('--graph2_bidir', action='store_true',
+                        help='graph 2: connect every pair inside a block both ways, not only '
+                             'past -> present, so utterances at the start of a block are not '
+                             'isolated')
     parser.add_argument('--soft_weight', action='store_true',
                         help='graph 2 (gat): weight every edge by the product of c^es along '
                              'the chain, in log space, instead of treating all edges of a block '
@@ -226,7 +230,7 @@ if __name__ == '__main__':
                           shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
                           shift_compare=args.shift_compare, shift_tau=args.shift_tau,
                           shift_mode=args.shift_mode, soft_weight=args.soft_weight,
-                          init_mu=args.init_mu).to(device)
+                          init_mu=args.init_mu, graph2_bidir=args.graph2_bidir).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

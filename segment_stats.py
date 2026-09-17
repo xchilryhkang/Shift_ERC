@@ -39,7 +39,8 @@ def stats(qmask, umask, labels, shift_pred, prev, valid, pol):
     B, T = umask.shape
     ok = umask.bool()
     blk = block_ids(shift_pred, qmask, prev, valid)
-    rel, both = build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals=1)
+    rel, both = build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals=1,
+                                    bidir=BIDIR)
     ctx = (rel == 2) | (rel == 3)                                    # REL_SAME | REL_CROSS
 
     deg = ctx.sum(-1)[ok]                                            # context edges per utterance
@@ -95,6 +96,9 @@ def report(acc, n_batch, tag):
     print(f"  edge purity (emotion)      {100 * acc['pure_emo'] / e:.1f}%")
 
 
+BIDIR = False
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--Dataset', default='IEMOCAP')
@@ -111,8 +115,10 @@ if __name__ == '__main__':
     ap.add_argument('--shift_emo_dim', type=int, default=None)
     ap.add_argument('--shift_compare', default='full', choices=['cat', 'full'])
     ap.add_argument('--shift_mode', default='pair', choices=['pair', 'polarity', 'both'])
+    ap.add_argument('--bidir', action='store_true', help='count edges as --graph2_bidir would')
     ap.add_argument('--no-cuda', action='store_true')
     args = ap.parse_args()
+    BIDIR = args.bidir
 
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
     if args.Dataset == 'IEMOCAP':

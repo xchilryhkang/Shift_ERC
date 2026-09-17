@@ -138,10 +138,17 @@ def soft_log_weight(cons, qmask, prev, valid):
     return torch.maximum(lw_spk, lw_time).clamp(max=0.0)                  # [B, T, T]
 
 
-def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_modal=True):
+def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_modal=True,
+                       bidir=False):
     """
     Returns rel [B, N, N] long (-1 = no edge) and in_both [B, N, N] bool.
     Node index n = m * T + t; row = target, column = source (same layout as semantic_GAT).
+
+    bidir=False: context edges run past -> present only, as in graph 1.
+    bidir=True : every pair inside a block is connected both ways. Inside a block all
+                 utterances are assumed to share an emotion, so there is no outdated emotion
+                 to leak backwards, and an utterance at the START of a block -- which has no
+                 past inside it -- stops being isolated.
     """
     B, T = umask.shape
     dev = umask.device
@@ -152,10 +159,12 @@ def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_m
     ok = umask.bool()
     t = torch.arange(T, device=dev)
 
-    past = (t[None, :, None] > t[None, None, :]) & ok[:, None, :] & ok[:, :, None]
+    order = (t[None, :, None] != t[None, None, :]) if bidir \
+        else (t[None, :, None] > t[None, None, :])
+    order = order & ok[:, None, :] & ok[:, :, None]
     e_spk = (blk[..., 0:1] == blk[..., 0].unsqueeze(1)) & \
-            (spk[:, :, None] == spk[:, None, :]) & past
-    e_time = (blk[..., 1:2] == blk[..., 1].unsqueeze(1)) & past
+            (spk[:, :, None] == spk[:, None, :]) & order
+    e_time = (blk[..., 1:2] == blk[..., 1].unsqueeze(1)) & order
     ctx, both_u = e_spk | e_time, e_spk & e_time                          # [B, T, T]
 
     # lift utterance-level masks to (utterance, modality) nodes
@@ -254,23 +263,23 @@ class EmotionalSheafGraph(nn.Module):
     """features (list of M x [B, T, H]) -> list of M x [B, T, H]"""
 
     def __init__(self, hidden_dim, n_modals=3, d=4, layers=2, map_type='diag',
-                 dropout=0.1, step_size=1.0, inter_modal=True, per_modal=False):
+                 dropout=0.1, step_size=1.0, inter_modal=True, per_modal=False, bidir=False):
         super().__init__()
         assert hidden_dim % d == 0, 'hidden_dim must be divisible by the stalk dimension d'
         if per_modal:
             assert not inter_modal, 'per-modality weights need inter_modal=False'
         self.n_modals, self.d, self.f = n_modals, d, hidden_dim // d
-        self.inter_modal, self.per_modal = inter_modal, per_modal
+        self.inter_modal, self.per_modal, self.bidir = inter_modal, per_modal, bidir
         mk = lambda: nn.ModuleList([
             SheafLayer(d, self.f, map_type, dropout=dropout, step_size=step_size)
             for _ in range(layers)])
         self.layers = nn.ModuleList([mk() for _ in range(n_modals)]) if per_modal else mk()
 
-    def forward(self, features, qmask, umask, shift_pred, prev, valid):
+    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
         B, T, H = features[0].shape
         N = self.n_modals * T
         rel, both = build_segment_edges(qmask, umask, shift_pred, prev, valid, self.n_modals,
-                                        self.inter_modal)
+                                        self.inter_modal, self.bidir)
         if self.per_modal:
             # no inter-modal edges -> block diagonal: one sheaf per modality, own weights
             outs = []
@@ -302,13 +311,14 @@ class EmotionalGATGraph(nn.Module):
     """
 
     def __init__(self, hidden_dim, n_modals=3, heads=4, layers=1, dropout=0.1,
-                 inter_modal=True, per_modal=False, soft_weight=False, init_mu=0.1):
+                 inter_modal=True, per_modal=False, soft_weight=False, init_mu=0.1,
+                 bidir=False):
         super().__init__()
         from semantic_GAT import StructuralPriorGATLayer
         if per_modal:
             assert not inter_modal, 'per-modality weights need inter_modal=False'
         self.n_modals, self.dropout = n_modals, dropout
-        self.inter_modal, self.per_modal = inter_modal, per_modal
+        self.inter_modal, self.per_modal, self.bidir = inter_modal, per_modal, bidir
         self.soft_weight = soft_weight
         if soft_weight:
             # log pi is added to the attention energy with a learnable strength mu >= 0.
@@ -327,7 +337,7 @@ class EmotionalGATGraph(nn.Module):
     def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
         B, T, H = features[0].shape
         rel, _ = build_segment_edges(qmask, umask, shift_pred, prev, valid, self.n_modals,
-                                     self.inter_modal)
+                                     self.inter_modal, self.bidir)
         rel = rel + 1                      # semantic_GAT: 0 = no edge, 1..4 = self/mod/same/cross
         phi = torch.zeros(rel.size(1), rel.size(2), device=rel.device)
 
