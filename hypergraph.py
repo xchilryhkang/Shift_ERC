@@ -12,10 +12,10 @@ Virtual node
 ------------
 Measured on IEMOCAP, direct inter-modal edges hurt graph 2 (removing them and giving each
 modality its own weights took 69.94 -> 72.36). So instead of connecting t/a/v to each other,
-each utterance gets a fourth, virtual node, initialised as the mean of its modalities, and one
-hyperedge {t, a, v, virtual} per utterance routes all cross-modal exchange through it. This is
-the idea of VUEMO's VUE node (Feng et al., Pattern Recognition 2026), but built by averaging
-rather than by a learned projection over a separate graph.
+each utterance gets a fourth, virtual node, and one hyperedge {t, a, v, virtual} per utterance
+routes all cross-modal exchange through it. The virtual node is initialised as the mean of its
+modalities by default, or can be supplied by the caller (for example, the semantic output of
+graph 1).
 
 Over-smoothing
 --------------
@@ -170,14 +170,20 @@ class EmotionalHyperGraph(nn.Module):
     def mu(self):
         return F.softplus(self.theta_mu) if self.soft_weight else None
 
-    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
+    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None,
+                virtual_node=None):
         B, T, H = features[0].shape
         M = self.n_modals
         P = M + (1 if self.virtual else 0)
 
         planes = list(features)
         if self.virtual:
-            planes.append(torch.stack(features, 0).mean(0))    # virtual node = mean of modalities
+            if virtual_node is None:
+                virtual_node = torch.stack(features, 0).mean(0)
+            elif virtual_node.shape != (B, T, H):
+                raise ValueError(
+                    f'virtual_node must have shape {(B, T, H)}, got {tuple(virtual_node.shape)}')
+            planes.append(virtual_node)
         x = torch.cat(planes, dim=1).reshape(B * P * T, H)
 
         ei, n_edges = build_segment_hyperedges(qmask, umask, shift_pred, prev, valid, M,

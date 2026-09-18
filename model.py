@@ -29,13 +29,15 @@ class BaselineModel(nn.Module):
         h_i^m = SemanticContextGraph({h^m})          optional (use_graph)
         h_i   = sum_m h_i^m
         s_i   = ShiftHead(h1, prev)                  optional (use_shift), [B, T, 2, 9]
-        h2    = graph2({h^m}, segments from s_i)     optional (graph2 != 'none')
+        h2    = graph2({h^m}, segments from s_i)     optional (graph2 != 'none'); hypergraph
+                virtual node = mean({h^m}) or h_i from graph 1
         h     = (1-a) LN(h1) + a LN(h2)              a learnable
         y_i   = Linear(Dropout(ReLU(h)))             emotion classifier
 
-    Graph 2 runs on the projected features (not on h1), so the two branches are parallel;
-    only its edge set depends on the shift predictions. With use_graph = use_shift = False
-    and graph2 = 'none' this is the plain no-context baseline.
+    Graph 2 modality nodes run on the projected features (not on h1). The two branches are
+    parallel by default; choosing the graph-1 semantic output as the hypergraph virtual node
+    connects graph 1 to graph 2. With use_graph = use_shift = False and graph2 = 'none' this is
+    the plain no-context baseline.
     """
 
     def __init__(self, D_text, D_visual, D_audio, n_classes, hidden_dim, dropout, modals='tav',
@@ -47,10 +49,18 @@ class BaselineModel(nn.Module):
                  graph2_inter_modal=True, graph2_per_modal=False,
                  shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
                  shift_mode='pair', soft_weight=False, init_mu=0.1,
-                 graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True):
+                 graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True,
+                 hyper_virtual_source='mean'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
+        if hyper_virtual_source not in ('mean', 'graph1'):
+            raise ValueError("hyper_virtual_source must be 'mean' or 'graph1'")
+        if hyper_virtual_source == 'graph1':
+            assert graph2 == 'hyper', "hyper_virtual_source='graph1' needs graph2='hyper'"
+            assert use_graph, "hyper_virtual_source='graph1' needs use_graph=True"
+            assert hyper_virtual, "hyper_virtual_source='graph1' needs hyper_virtual=True"
+        self.hyper_virtual_source = hyper_virtual_source
 
         in_dims = {'t': D_text, 'a': D_audio, 'v': D_visual}
         self.proj = nn.ModuleDict({m: nn.Linear(in_dims[m], hidden_dim) for m in modals})
@@ -119,7 +129,12 @@ class BaselineModel(nn.Module):
             # the hard partition uses argmax (not differentiable anyway), but c^es must keep
             # its gradient so the main loss can reach the shift head
             cons = consistency(shift_logits) if getattr(self.emo, 'soft_weight', False) else None
-            h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons))
+            if self.graph2 == 'hyper':
+                virtual_node = h if self.hyper_virtual_source == 'graph1' else None
+                h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons,
+                                  virtual_node=virtual_node))
+            else:
+                h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons))
             a = torch.sigmoid(self.alpha)
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
 

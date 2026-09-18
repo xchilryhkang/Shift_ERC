@@ -162,12 +162,16 @@ if __name__ == '__main__':
                              'of a block then receives an identical vector')
     parser.add_argument('--hyper_no_virtual', action='store_true',
                         help='hypergraph: drop the virtual node (no cross-modal hyperedge)')
+    parser.add_argument('--hyper_virtual_source', default='mean', choices=['mean', 'graph1'],
+                        help="hypergraph virtual-node source: modality mean (default), or "
+                             "the fused semantic output of graph 1")
     parser.add_argument('--sheaf_d', type=int, default=4, help='stalk dimension (must divide hidden_dim)')
     parser.add_argument('--sheaf_layers', type=int, default=2)
     parser.add_argument('--sheaf_map', default='diag', choices=['diag', 'general'])
     parser.add_argument('--sheaf_step', type=float, default=1.0, help='Euler step size tau')
     parser.add_argument('--graph2_heads', type=int, default=4, help='only for --graph2 gat')
-    parser.add_argument('--graph2_layers', type=int, default=1, help='only for --graph2 gat')
+    parser.add_argument('--graph2_layers', type=int, default=1,
+                        help='number of propagation layers for --graph2 gat or hyper')
     parser.add_argument('--graph2_dropout', type=float, default=0.1)
     parser.add_argument('--shift_depth', type=int, default=0,
                         help='0 = single linear layer (original); >=1 adds an emotion-space MLP')
@@ -208,6 +212,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.soft_weight and args.graph2 != 'gat':
         parser.error('--soft_weight is only implemented for --graph2 gat')
+    if args.hyper_virtual_source == 'graph1':
+        if args.graph2 != 'hyper':
+            parser.error('--hyper_virtual_source graph1 needs --graph2 hyper')
+        if not args.use_graph:
+            parser.error('--hyper_virtual_source graph1 needs --use_graph')
+        if args.hyper_no_virtual:
+            parser.error('--hyper_virtual_source graph1 conflicts with --hyper_no_virtual')
     print(args)
     seed_everything(args.seed)
 
@@ -239,7 +250,8 @@ if __name__ == '__main__':
                           shift_mode=args.shift_mode, soft_weight=args.soft_weight,
                           init_mu=args.init_mu, graph2_bidir=args.graph2_bidir,
                           hyper_attn=not args.hyper_mean, hyper_loo=not args.hyper_no_loo,
-                          hyper_virtual=not args.hyper_no_virtual).to(device)
+                          hyper_virtual=not args.hyper_no_virtual,
+                          hyper_virtual_source=args.hyper_virtual_source).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
