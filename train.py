@@ -6,7 +6,8 @@ import time
 import numpy as np
 import torch
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix, f1_score,
+                             precision_score, recall_score)
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
@@ -51,7 +52,7 @@ def get_loaders(dataset_cls, path, batch_size=32, valid=0.1, num_workers=0, pin_
 def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False,
                         w_shift=0.0, warmup=False, w_pol=0.0, w_cons=0.0):
     losses, preds, labels, masks = [], [], [], []
-    s_preds, s_labels, b_preds = [], [], []
+    s_preds, s_labels, b_preds, b_chan = [], [], [], []
 
     assert not train or optimizer is not None
     device = next(model.parameters()).device
@@ -89,6 +90,9 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
                 # the binary decision the partition actually consumes: obeys --shift_tau
                 b_preds.append(predict_shift(shift_logits, tau=model.shift_tau)
                                .reshape(-1)[keep].cpu().numpy())
+                # which perspective each pair came from: 0 = p_u (same speaker), 1 = q_u
+                ch = torch.arange(2, device=y_shift.device).expand_as(y_shift)
+                b_chan.append(ch.reshape(-1)[keep].cpu().numpy())
 
             pred_ = torch.argmax(prob.view(-1, prob.size(2)), 1)
             preds.append(pred_.cpu().numpy())
@@ -115,9 +119,18 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
         out['shift_acc'] = round(accuracy_score(sl, sp) * 100, 2)
         # the partition only consumes the binary decision, so report that too
         bl = (sl // 3) != (sl % 3)
-        bp = np.concatenate(b_preds)
+        bp, ch = np.concatenate(b_preds), np.concatenate(b_chan)
         out['shift_bacc'] = round(accuracy_score(bl, bp) * 100, 2)
         out['shift_bf1'] = round(f1_score(bl, bp, zero_division=0) * 100, 2)
+        out['shift_bprec'] = round(precision_score(bl, bp, zero_division=0) * 100, 2)
+        out['shift_brec'] = round(recall_score(bl, bp, zero_division=0) * 100, 2)
+        # the two perspectives have very different shift rates (14.3% for p_u vs 36.8% for
+        # q_u on IEMOCAP), so a single threshold cannot be right for both
+        for k, tag in ((0, 'p'), (1, 'q')):
+            sel = ch == k
+            if sel.any():
+                out[f'shift_bf1_{tag}'] = round(f1_score(bl[sel], bp[sel], zero_division=0) * 100, 2)
+                out[f'shift_rate_{tag}'] = round(100 * bl[sel].mean(), 1)
         out['shift_rate'] = round(100 * bl.mean(), 1)
     return out
 
@@ -294,8 +307,13 @@ if __name__ == '__main__':
                'test_loss: {}, test_acc: {}, test_fscore: {}').format(
             e + 1, tr['loss'], tr['acc'], tr['fscore'], te['loss'], te['acc'], te['fscore'])
         if te['shift_f1'] is not None:
-            msg += ', shift_acc: {}, shift_mF1: {}, bin_acc: {}, bin_F1: {}'.format(
-                te['shift_acc'], te['shift_f1'], te['shift_bacc'], te['shift_bf1'])
+            # train side too: it says whether the shift head is under- or over-fitting, which
+            # points at opposite fixes (more capacity vs more regularisation)
+            msg += (', shift[tr/te] acc: {}/{}, mF1: {}/{}, bin_acc: {}/{}, bin_F1: {}/{}').format(
+                tr['shift_acc'], te['shift_acc'], tr['shift_f1'], te['shift_f1'],
+                tr['shift_bacc'], te['shift_bacc'], tr['shift_bf1'], te['shift_bf1'])
+        if te.get('shift_bf1_p') is not None:
+            msg += ', bin_F1[p/q]: {}/{}'.format(te['shift_bf1_p'], te['shift_bf1_q'])
         if args.graph2 != 'none':
             msg += ', alpha: {:.3f}'.format(torch.sigmoid(model.alpha).item())
             if args.soft_weight:
@@ -309,6 +327,11 @@ if __name__ == '__main__':
                   'b_cross={b_cross:.3f} lambda={lam:.3f}'.format(**r))
 
     print('Model Performance:')
+    if best.get('shift_f1') is not None:
+        print('Shift head at the best epoch (test): acc {} | macro-F1 {} | binary acc {} | '
+              'binary F1 {} | precision {} | recall {}'.format(
+                  best['shift_acc'], best['shift_f1'], best['shift_bacc'], best['shift_bf1'],
+                  best['shift_bprec'], best['shift_brec']))
     print('Best_Test-FScore-epoch_index: {}'.format(all_test_fscore.index(max(all_test_fscore)) + 1))
     print('Best_Test_F-Score: {}'.format(max(all_test_fscore)))
     print(classification_report(best['label'], best['pred'], sample_weight=best['mask'],
