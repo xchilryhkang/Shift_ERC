@@ -151,9 +151,19 @@ class ShiftHead(nn.Module):
                                weight=weight, ignore_index=-100)
 
     @staticmethod
-    def loss(logits, y, weight=None):
-        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1),
-                               weight=weight, ignore_index=-100)
+    def loss(logits, y, weight=None, focal_gamma=0.0):
+        """9-way transition loss; focal_gamma=0 recovers ordinary cross-entropy."""
+        logits = logits.reshape(-1, logits.size(-1))
+        y = y.reshape(-1)
+        valid = y != -100
+        if not valid.any():
+            return logits.sum() * 0
+
+        ce = F.cross_entropy(logits[valid], y[valid], weight=weight, reduction='none')
+        if focal_gamma > 0:
+            pt = torch.exp(-ce)
+            ce = (1.0 - pt).pow(focal_gamma) * ce
+        return ce.mean()
 
     def consistency(self, logits):
         """P(no shift) = sum of the diagonal entries (m -> m). [B, T, 2]"""
