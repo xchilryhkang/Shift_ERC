@@ -154,7 +154,14 @@ if __name__ == '__main__':
     parser.add_argument('--use_shift', action='store_true', help='enable the 9-way shift head')
     parser.add_argument('--w_shift', type=float, default=0.3, help='weight of the shift loss')
     # emotional context graph (segment partition + sheaf); needs --use_shift
-    parser.add_argument('--graph2', default='none', choices=['none', 'gat', 'sheaf'])
+    parser.add_argument('--graph2', default='none', choices=['none', 'gat', 'sheaf', 'hyper'])
+    parser.add_argument('--hyper_mean', action='store_true',
+                        help='hypergraph: pool a hyperedge with a plain mean instead of attention')
+    parser.add_argument('--hyper_no_loo', action='store_true',
+                        help='hypergraph: keep the node in its own hyperedge message; every member '
+                             'of a block then receives an identical vector')
+    parser.add_argument('--hyper_no_virtual', action='store_true',
+                        help='hypergraph: drop the virtual node (no cross-modal hyperedge)')
     parser.add_argument('--sheaf_d', type=int, default=4, help='stalk dimension (must divide hidden_dim)')
     parser.add_argument('--sheaf_layers', type=int, default=2)
     parser.add_argument('--sheaf_map', default='diag', choices=['diag', 'general'])
@@ -230,7 +237,9 @@ if __name__ == '__main__':
                           shift_depth=args.shift_depth, shift_emo_dim=args.shift_emo_dim,
                           shift_compare=args.shift_compare, shift_tau=args.shift_tau,
                           shift_mode=args.shift_mode, soft_weight=args.soft_weight,
-                          init_mu=args.init_mu, graph2_bidir=args.graph2_bidir).to(device)
+                          init_mu=args.init_mu, graph2_bidir=args.graph2_bidir,
+                          hyper_attn=not args.hyper_mean, hyper_loo=not args.hyper_no_loo,
+                          hyper_virtual=not args.hyper_no_virtual).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

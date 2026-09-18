@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from semantic_GAT import SemanticContextGraph
 from shift import ShiftHead, build_shift_pairs, polarity_map, shift_labels
+from hypergraph import EmotionalHyperGraph
 from sheaf import EmotionalGATGraph, EmotionalSheafGraph, consistency, predict_shift
 
 
@@ -46,7 +47,7 @@ class BaselineModel(nn.Module):
                  graph2_inter_modal=True, graph2_per_modal=False,
                  shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
                  shift_mode='pair', soft_weight=False, init_mu=0.1,
-                 graph2_bidir=False):
+                 graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -82,6 +83,11 @@ class BaselineModel(nn.Module):
                                              per_modal=graph2_per_modal,
                                              soft_weight=soft_weight, init_mu=init_mu,
                                              bidir=graph2_bidir)
+            elif graph2 == 'hyper':
+                self.emo = EmotionalHyperGraph(hidden_dim, n_modals=len(modals),
+                                               layers=graph2_layers, dropout=graph2_dropout,
+                                               attn=hyper_attn, loo=hyper_loo,
+                                               virtual=hyper_virtual)
             else:
                 raise ValueError(f'unknown graph2: {graph2}')
             self.ln1 = nn.LayerNorm(hidden_dim)
