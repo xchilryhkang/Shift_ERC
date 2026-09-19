@@ -51,11 +51,18 @@ class BaselineModel(nn.Module):
                  shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
                  shift_mode='pair', soft_weight=False, init_mu=0.1,
                  graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True,
-                 hyper_virtual_source='mean', cut='shift', cut_tau=0.5, con_by='polarity'):
+                 hyper_virtual_source='mean', cut='shift', cut_tau=0.5, con_by='polarity',
+                 split_heads=False, graph2_node='x'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
         self.cut, self.cut_tau, self.con_by = cut, cut_tau, con_by
+        # split_heads: graph 1 is trained only by the contrastive loss (detached before it
+        # can receive the ERC loss); the classifier reads only h2. Isolates graph 2 as the
+        # classifier and, with --oracle_shift, gives its ceiling under a perfect partition.
+        self.split_heads, self.graph2_node = split_heads, graph2_node
+        if split_heads and graph2 == 'none':
+            raise ValueError('--split_heads needs graph2 != none')
         if hyper_virtual_source not in ('mean', 'graph1'):
             raise ValueError("hyper_virtual_source must be 'mean' or 'graph1'")
         if hyper_virtual_source == 'graph1':
@@ -124,6 +131,10 @@ class BaselineModel(nn.Module):
         if self.use_shift:
             shift_logits, pol_logits = self.shift(h, prev)                       # [B, T, 2, 9]
 
+        # in split-heads mode the classifier reads only h2, and graph 1 gets no ERC gradient
+        gx = [t.detach() for t in x] if self.split_heads else x
+        gh1 = h.detach() if self.split_heads else h
+
         if self.graph2 != 'none' and not warmup:
             if self.oracle_shift:
                 # ceiling experiment: build the partition from ground-truth polarities
@@ -133,24 +144,31 @@ class BaselineModel(nn.Module):
                       p.unsqueeze(-1)) & valid
             elif self.cut == 'cosine':
                 # boundaries straight from the graph-1 embedding, no shift head
-                sp = cosine_shift(h.detach(), qmask, umask, prev, valid, self.cut_tau)
+                sp = cosine_shift(gh1, qmask, umask, prev, valid, self.cut_tau)
             else:
                 sp = predict_shift(shift_logits.detach(), tau=self.shift_tau)   # [B, T, 2] bool
             soft = getattr(self.emo, 'soft_weight', False)
             if soft and self.cut == 'cosine':
-                cons = cosine_consistency(h, qmask, umask, prev, valid)
+                cons = cosine_consistency(gh1, qmask, umask, prev, valid)
             elif soft:
                 cons = consistency(shift_logits)
             else:
                 cons = None
+            # node features for graph 2: raw projections, or the (detached) graph-1 output
+            g2in = list(hs) if self.graph2_node == 'h1' else gx
+            if self.split_heads and self.graph2_node == 'h1':
+                g2in = [t.detach() for t in g2in]
             if self.graph2 == 'hyper':
-                virtual_node = h if self.hyper_virtual_source == 'graph1' else None
-                h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons,
+                virtual_node = gh1 if self.hyper_virtual_source == 'graph1' else None
+                h2 = sum(self.emo(g2in, qmask, umask, sp, prev, valid, cons=cons,
                                   virtual_node=virtual_node))
             else:
-                h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons))
-            a = torch.sigmoid(self.alpha)
-            h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
+                h2 = sum(self.emo(g2in, qmask, umask, sp, prev, valid, cons=cons))
+            if self.split_heads:
+                h = self.ln2(h2)                    # classifier reads only graph 2
+            else:
+                a = torch.sigmoid(self.alpha)
+                h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
 
         logits = self.classifier(h)                                              # [B, T, C]
         return F.log_softmax(logits, dim=-1), F.softmax(logits, dim=-1), h1, shift_logits, pol_logits

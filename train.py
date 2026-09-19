@@ -203,6 +203,13 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_per_modal', action='store_true',
                         help='graph 2 only: separate weights per modality '
                              '(needs --graph2_no_inter_modal)')
+    parser.add_argument('--split_heads', action='store_true',
+                        help='graph 1 trained only by contrastive (needs --w_con); classifier '
+                             'reads only graph 2. With --oracle_shift = ceiling of graph 2 as '
+                             'the classifier under a perfect partition, no gradient conflict')
+    parser.add_argument('--graph2_node', default='x', choices=['x', 'h1'],
+                        help="node features for graph 2: 'x' (after Linear) or 'h1' (graph-1 "
+                             "output, detached in split-heads mode)")
     parser.add_argument('--cut', default='shift', choices=['shift', 'cosine'],
                         help="how graph 2 gets segment boundaries: 'shift' = ShiftHead argmax/tau, "
                              "'cosine' = distance on the graph-1 embedding (no shift head)")
@@ -247,6 +254,8 @@ if __name__ == '__main__':
             parser.error('--hyper_virtual_source graph1 needs --use_graph')
         if args.hyper_no_virtual:
             parser.error('--hyper_virtual_source graph1 conflicts with --hyper_no_virtual')
+    if args.split_heads and args.w_con <= 0:
+        parser.error('--split_heads leaves graph 1 with no ERC gradient, so it needs --w_con > 0')
     print(args)
     seed_everything(args.seed)
 
@@ -280,7 +289,8 @@ if __name__ == '__main__':
                           hyper_attn=not args.hyper_mean, hyper_loo=not args.hyper_no_loo,
                           hyper_virtual=not args.hyper_no_virtual,
                           hyper_virtual_source=args.hyper_virtual_source,
-                          cut=args.cut, cut_tau=args.cut_tau, con_by=args.con_by).to(device)
+                          cut=args.cut, cut_tau=args.cut_tau, con_by=args.con_by,
+                          split_heads=args.split_heads, graph2_node=args.graph2_node).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
