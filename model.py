@@ -6,6 +6,7 @@ from semantic_GAT import SemanticContextGraph
 from shift import ShiftHead, build_shift_pairs, polarity_map, shift_labels
 from hypergraph import EmotionalHyperGraph
 from sheaf import EmotionalGATGraph, EmotionalSheafGraph, consistency, predict_shift
+from contrastive import cosine_shift, cosine_consistency
 
 
 class MaskedNLLLoss(nn.Module):
@@ -50,10 +51,11 @@ class BaselineModel(nn.Module):
                  shift_depth=0, shift_emo_dim=None, shift_compare='full', shift_tau=None,
                  shift_mode='pair', soft_weight=False, init_mu=0.1,
                  graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True,
-                 hyper_virtual_source='mean'):
+                 hyper_virtual_source='mean', cut='shift', cut_tau=0.5, con_by='polarity'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
+        self.cut, self.cut_tau, self.con_by = cut, cut_tau, con_by
         if hyper_virtual_source not in ('mean', 'graph1'):
             raise ValueError("hyper_virtual_source must be 'mean' or 'graph1'")
         if hyper_virtual_source == 'graph1':
@@ -75,11 +77,13 @@ class BaselineModel(nn.Module):
             self.shift = ShiftHead(hidden_dim, dropout, depth=shift_depth,
                                    emo_dim=shift_emo_dim, compare=shift_compare,
                                    mode=shift_mode)
+        if not hasattr(self, 'pol'):
             self.register_buffer('pol', polarity_map(dataset))
 
         self.graph2, self.oracle_shift, self.shift_tau = graph2, oracle_shift, shift_tau
         if graph2 != 'none':
-            assert use_shift, "graph2 needs the shift head to build the partition (--use_shift)"
+            assert use_shift or cut == 'cosine' or oracle_shift, \
+                "graph2 needs a partition source: --use_shift, --cut cosine, or --oracle_shift"
             if graph2 == 'sheaf':
                 self.emo = EmotionalSheafGraph(hidden_dim, n_modals=len(modals), d=sheaf_d,
                                                layers=sheaf_layers, map_type=sheaf_map,
@@ -111,10 +115,13 @@ class BaselineModel(nn.Module):
         x = [self.proj[m](inputs[m].permute(1, 0, 2)) for m in self.modals]      # M x [B, T, H]
         hs = self.graph(x, qmask, umask) if self.use_graph else x
         h = sum(hs)                                                              # [B, T, H]
+        h1 = h                                                                   # graph-1 output, before fusion
 
         shift_logits = pol_logits = None
-        if self.use_shift:
+        need_pairs = self.use_shift or (self.graph2 != 'none') or self.cut == 'cosine'
+        if need_pairs:
             prev, valid = build_shift_pairs(qmask, umask)
+        if self.use_shift:
             shift_logits, pol_logits = self.shift(h, prev)                       # [B, T, 2, 9]
 
         if self.graph2 != 'none' and not warmup:
@@ -124,11 +131,18 @@ class BaselineModel(nn.Module):
                 p = self.pol[labels.clamp(min=0)]
                 sp = (torch.gather(p.unsqueeze(-1).expand(-1, -1, 2), 1, prev) !=
                       p.unsqueeze(-1)) & valid
+            elif self.cut == 'cosine':
+                # boundaries straight from the graph-1 embedding, no shift head
+                sp = cosine_shift(h.detach(), qmask, umask, prev, valid, self.cut_tau)
             else:
                 sp = predict_shift(shift_logits.detach(), tau=self.shift_tau)   # [B, T, 2] bool
-            # the hard partition uses argmax (not differentiable anyway), but c^es must keep
-            # its gradient so the main loss can reach the shift head
-            cons = consistency(shift_logits) if getattr(self.emo, 'soft_weight', False) else None
+            soft = getattr(self.emo, 'soft_weight', False)
+            if soft and self.cut == 'cosine':
+                cons = cosine_consistency(h, qmask, umask, prev, valid)
+            elif soft:
+                cons = consistency(shift_logits)
+            else:
+                cons = None
             if self.graph2 == 'hyper':
                 virtual_node = h if self.hyper_virtual_source == 'graph1' else None
                 h2 = sum(self.emo(x, qmask, umask, sp, prev, valid, cons=cons,
@@ -139,7 +153,7 @@ class BaselineModel(nn.Module):
             h = (1 - a) * self.ln1(h) + a * self.ln2(h2)
 
         logits = self.classifier(h)                                              # [B, T, C]
-        return F.log_softmax(logits, dim=-1), F.softmax(logits, dim=-1), h, shift_logits, pol_logits
+        return F.log_softmax(logits, dim=-1), F.softmax(logits, dim=-1), h1, shift_logits, pol_logits
 
     def param_groups(self, lr, prior_lr, weight_decay):
         """Prior scalars (b_rel, theta) need a much larger lr and no weight decay."""

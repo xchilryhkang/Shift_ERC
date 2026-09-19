@@ -15,6 +15,7 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from dataloader import IEMOCAPDataset, MELDDataset
 from model import BaselineModel, MaskedNLLLoss
 from shift import build_shift_pairs, shift_labels
+from contrastive import sup_con_loss
 from sheaf import predict_shift
 from vision import confuPLT
 
@@ -50,7 +51,7 @@ def get_loaders(dataset_cls, path, batch_size=32, valid=0.1, num_workers=0, pin_
 
 
 def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=False,
-                        w_shift=0.0, warmup=False, w_pol=0.0, w_cons=0.0):
+                        w_shift=0.0, warmup=False, w_pol=0.0, w_cons=0.0, w_con=0.0, con_by='polarity'):
     losses, preds, labels, masks = [], [], [], []
     s_preds, s_labels, b_preds, b_chan = [], [], [], []
 
@@ -67,12 +68,17 @@ def train_or_eval_model(model, loss_function, dataloader, optimizer=None, train=
             qmask = qmask.permute(1, 0, 2)                       # [B, T, n_speakers]
             lengths = umask.sum(dim=1).long()                    # [B]
 
-            log_prob, prob, _, shift_logits, pol_logits = model(
+            log_prob, prob, h1, shift_logits, pol_logits = model(
                 textf, visuf, acouf, umask, qmask, lengths, warmup=warmup, labels=label)
 
             lp_ = log_prob.view(-1, log_prob.size(2))
             labels_ = label.view(-1)
             loss = loss_function(lp_, labels_, umask)
+
+            if w_con > 0:
+                pol = model.pol if con_by == 'polarity' else None
+                loss = loss + w_con * sup_con_loss(h1, label, umask, pol=pol)
+
 
             if shift_logits is not None:
                 prev, valid = build_shift_pairs(qmask, umask)
@@ -197,6 +203,15 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_per_modal', action='store_true',
                         help='graph 2 only: separate weights per modality '
                              '(needs --graph2_no_inter_modal)')
+    parser.add_argument('--cut', default='shift', choices=['shift', 'cosine'],
+                        help="how graph 2 gets segment boundaries: 'shift' = ShiftHead argmax/tau, "
+                             "'cosine' = distance on the graph-1 embedding (no shift head)")
+    parser.add_argument('--cut_tau', default=0.5, type=float,
+                        help='cosine-distance threshold for --cut cosine')
+    parser.add_argument('--w_con', default=0.0, type=float,
+                        help='weight of the supervised contrastive loss on the graph-1 output')
+    parser.add_argument('--con_by', default='polarity', choices=['polarity', 'emotion'],
+                        help='contrastive positives share polarity (3) or full emotion label')
     parser.add_argument('--shift_mode', default='pair', choices=['pair', 'polarity', 'both'],
                         help="'polarity' predicts one polarity per utterance (transitive by "
                              "construction); 'both' keeps the pairwise head and ties it to the "
@@ -264,7 +279,8 @@ if __name__ == '__main__':
                           init_mu=args.init_mu, graph2_bidir=args.graph2_bidir,
                           hyper_attn=not args.hyper_mean, hyper_loo=not args.hyper_no_loo,
                           hyper_virtual=not args.hyper_no_virtual,
-                          hyper_virtual_source=args.hyper_virtual_source).to(device)
+                          hyper_virtual_source=args.hyper_virtual_source,
+                          cut=args.cut, cut_tau=args.cut_tau, con_by=args.con_by).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -292,10 +308,12 @@ if __name__ == '__main__':
         start_time = time.time()
         warm = args.graph2 != 'none' and e < args.warmup_epochs
         tr = train_or_eval_model(model, loss_function, train_loader, optimizer, True,
-                                 args.w_shift, warm, args.w_pol, args.w_cons)
+                                 args.w_shift, warm, args.w_pol, args.w_cons,
+                                 args.w_con, args.con_by)
         te = train_or_eval_model(model, loss_function, test_loader, train=False,
                                  w_shift=args.w_shift, warmup=warm,
-                                 w_pol=args.w_pol, w_cons=args.w_cons)
+                                 w_pol=args.w_pol, w_cons=args.w_cons,
+                                 w_con=args.w_con, con_by=args.con_by)
         scheduler.step()
 
         all_test_fscore.append(te['fscore'])

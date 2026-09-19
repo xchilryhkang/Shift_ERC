@@ -68,6 +68,7 @@ if __name__ == '__main__':
     ap.add_argument('--shift_emo_dim', type=int, default=None)
     ap.add_argument('--shift_compare', default='full', choices=['cat', 'full'])
     ap.add_argument('--shift_mode', default='pair', choices=['pair', 'polarity', 'both'])
+    ap.add_argument('--no_shift', action='store_true', help='checkpoint has no shift head (cosine cut)')
     ap.add_argument('--modals', default='tav')
     ap.add_argument('--probe_C', type=float, default=1.0)
     ap.add_argument('--no-cuda', action='store_true')
@@ -83,7 +84,7 @@ if __name__ == '__main__':
     loader = DataLoader(ds, batch_size=args.batch_size, collate_fn=ds.collate_fn)
 
     model = BaselineModel(1024, 342, D_a, n_classes=n_cls, hidden_dim=args.hidden_dim, dropout=0.0,
-                          modals=args.modals, dataset=args.Dataset, use_graph=True, use_shift=True,
+                          modals=args.modals, dataset=args.Dataset, use_graph=True, use_shift=not args.no_shift,
                           heads=args.heads, layers=args.layers, window=args.window,
                           link_prev_same=args.link_prev_same, shift_depth=args.shift_depth,
                           shift_emo_dim=args.shift_emo_dim, shift_compare=args.shift_compare,
