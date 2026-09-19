@@ -102,6 +102,22 @@ def block_ids(shift_pred, qmask, prev, valid):
     return torch.stack([spk_blk, time_blk], dim=-1)
 
 
+def time_block_ids(shift_adj, umask):
+    """
+    Single-chain partition: walk u_i, u_{i-1}, ... in plain temporal order and cut whenever the
+    adjacent pair (i-1 -> i) is a shift, regardless of speaker. A block is a contiguous run of
+    utterances with no adjacent shift inside it.
+
+    shift_adj : [B, T] bool, True when the pair (u_{i-1} -> u_i) is a shift (i>=1). shift_adj[:,0]
+                is ignored (no pair before u_0).
+    Returns blk [B, T] long; two utterances share a block iff same id.
+    """
+    cut = shift_adj.clone()
+    cut[:, 0] = True                                   # u0 always starts a block
+    cut = cut & umask.bool()
+    return torch.cumsum(cut.long(), dim=1)
+
+
 def soft_log_weight(cons, qmask, prev, valid):
     """
     Soft edge weight from the shift head, in log space:
@@ -139,7 +155,7 @@ def soft_log_weight(cons, qmask, prev, valid):
 
 
 def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_modal=True,
-                       bidir=False):
+                       bidir=False, chain='both', shift_adj=None):
     """
     Returns rel [B, N, N] long (-1 = no edge) and in_both [B, N, N] bool.
     Node index n = m * T + t; row = target, column = source (same layout as semantic_GAT).
@@ -154,18 +170,25 @@ def build_segment_edges(qmask, umask, shift_pred, prev, valid, n_modals, inter_m
     dev = umask.device
     N = n_modals * T
 
-    blk = block_ids(shift_pred, qmask, prev, valid)                       # [B, T, 2]
     spk = qmask.argmax(-1)
     ok = umask.bool()
     t = torch.arange(T, device=dev)
-
     order = (t[None, :, None] != t[None, None, :]) if bidir \
         else (t[None, :, None] > t[None, None, :])
     order = order & ok[:, None, :] & ok[:, :, None]
-    e_spk = (blk[..., 0:1] == blk[..., 0].unsqueeze(1)) & \
-            (spk[:, :, None] == spk[:, None, :]) & order
-    e_time = (blk[..., 1:2] == blk[..., 1].unsqueeze(1)) & order
-    ctx, both_u = e_spk | e_time, e_spk & e_time                          # [B, T, T]
+
+    if chain == 'time':
+        # one temporal chain: block = contiguous run with no adjacent shift, speaker ignored
+        assert shift_adj is not None, "chain='time' needs shift_adj [B, T]"
+        tb = time_block_ids(shift_adj, umask)                             # [B, T]
+        same_blk = (tb[:, :, None] == tb[:, None, :]) & order
+        ctx, both_u = same_blk, torch.zeros_like(same_blk)
+    else:
+        blk = block_ids(shift_pred, qmask, prev, valid)                   # [B, T, 2]
+        e_spk = (blk[..., 0:1] == blk[..., 0].unsqueeze(1)) & \
+                (spk[:, :, None] == spk[:, None, :]) & order
+        e_time = (blk[..., 1:2] == blk[..., 1].unsqueeze(1)) & order
+        ctx, both_u = e_spk | e_time, e_spk & e_time                      # [B, T, T]
 
     # lift utterance-level masks to (utterance, modality) nodes
     n = torch.arange(N, device=dev)
@@ -275,11 +298,12 @@ class EmotionalSheafGraph(nn.Module):
             for _ in range(layers)])
         self.layers = nn.ModuleList([mk() for _ in range(n_modals)]) if per_modal else mk()
 
-    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
+    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None,
+                chain='both', shift_adj=None):
         B, T, H = features[0].shape
         N = self.n_modals * T
         rel, both = build_segment_edges(qmask, umask, shift_pred, prev, valid, self.n_modals,
-                                        self.inter_modal, self.bidir)
+                                        self.inter_modal, self.bidir, chain, shift_adj)
         if self.per_modal:
             # no inter-modal edges -> block diagonal: one sheaf per modality, own weights
             outs = []
@@ -334,10 +358,11 @@ class EmotionalGATGraph(nn.Module):
     def mu(self):
         return F.softplus(self.theta_mu) if self.soft_weight else None
 
-    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None):
+    def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None,
+                chain='both', shift_adj=None):
         B, T, H = features[0].shape
         rel, _ = build_segment_edges(qmask, umask, shift_pred, prev, valid, self.n_modals,
-                                     self.inter_modal, self.bidir)
+                                     self.inter_modal, self.bidir, chain, shift_adj)
         rel = rel + 1                      # semantic_GAT: 0 = no edge, 1..4 = self/mod/same/cross
         phi = torch.zeros(rel.size(1), rel.size(2), device=rel.device)
 

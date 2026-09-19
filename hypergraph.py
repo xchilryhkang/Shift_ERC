@@ -39,14 +39,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sheaf import block_ids
+from sheaf import block_ids, time_block_ids
 
 
 # ---------------------------------------------------------------------------
 # Hypergraph construction
 # ---------------------------------------------------------------------------
 def build_segment_hyperedges(qmask, umask, shift_pred, prev, valid, n_modals,
-                             virtual=True, virtual_in_segment=True):
+                             virtual=True, virtual_in_segment=True,
+                             chain='both', shift_adj=None):
     """
     Node id (batch-offset): b * (M + V) * T + m * T + t, with m = M for the virtual node.
 
@@ -66,24 +67,27 @@ def build_segment_hyperedges(qmask, umask, shift_pred, prev, valid, n_modals,
     P = M + V                                              # node planes per utterance
     ok = umask.bool()
 
-    blk = block_ids(shift_pred, qmask, prev, valid)         # [B, T, 2]
     spk = qmask.argmax(-1)
     S = qmask.size(-1)
-
-    # a block is identified by (chain, key); the speaker chain also needs the speaker id
-    key_spk = spk * (T + 2) + blk[..., 0]                   # [B, T]
-    key_time = blk[..., 1]
-    Kmax = max(S * (T + 2), T + 2) + 1
+    if chain == 'time':
+        assert shift_adj is not None, "chain='time' needs shift_adj"
+        tb = time_block_ids(shift_adj, umask)              # [B, T]
+        chains = [(1, tb)]                                  # a single temporal chain
+        Kmax = T + 2
+    else:
+        blk = block_ids(shift_pred, qmask, prev, valid)    # [B, T, 2]
+        chains = [(0, spk * (T + 2) + blk[..., 0]), (1, blk[..., 1])]
+        Kmax = max(S * (T + 2), T + 2) + 1
 
     b_idx = torch.arange(B, device=dev)[:, None].expand(B, T)
     t_idx = torch.arange(T, device=dev)[None, :].expand(B, T)
 
     planes = P if virtual_in_segment else M                 # does the virtual node get context?
     node_src, edge_code = [], []
-    for chain, key in ((0, key_spk), (1, key_time)):
+    for chain_id, key in chains:
         for m in range(planes):
             node = b_idx * P * T + m * T + t_idx            # [B, T]
-            code = ((b_idx * 2 + chain) * Kmax + key) * (P + 1) + m
+            code = ((b_idx * 2 + chain_id) * Kmax + key) * (P + 1) + m
             node_src.append(node[ok])
             edge_code.append(code[ok])
 
@@ -171,6 +175,7 @@ class EmotionalHyperGraph(nn.Module):
         return F.softplus(self.theta_mu) if self.soft_weight else None
 
     def forward(self, features, qmask, umask, shift_pred, prev, valid, cons=None,
+                chain='both', shift_adj=None,
                 virtual_node=None):
         B, T, H = features[0].shape
         M = self.n_modals
@@ -187,7 +192,8 @@ class EmotionalHyperGraph(nn.Module):
         x = torch.cat(planes, dim=1).reshape(B * P * T, H)
 
         ei, n_edges = build_segment_hyperedges(qmask, umask, shift_pred, prev, valid, M,
-                                               self.virtual, self.virtual_in_segment)
+                                               self.virtual, self.virtual_in_segment,
+                                               chain=chain, shift_adj=shift_adj)
         for layer in self.layers:
             x = x + F.elu(F.dropout(layer(x, ei, n_edges), self.dropout, self.training))
         return list(x.reshape(B, P * T, H).split(T, dim=1))

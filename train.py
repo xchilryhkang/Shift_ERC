@@ -203,6 +203,10 @@ if __name__ == '__main__':
     parser.add_argument('--graph2_per_modal', action='store_true',
                         help='graph 2 only: separate weights per modality '
                              '(needs --graph2_no_inter_modal)')
+    parser.add_argument('--chain', default='both', choices=['both', 'time'],
+                        help="segment chains: 'both' = speaker + time (default), "
+                             "'time' = one temporal chain, cut at every adjacent shift "
+                             'regardless of speaker')
     parser.add_argument('--split_heads', action='store_true',
                         help='graph 1 trained only by contrastive (needs --w_con); classifier '
                              'reads only graph 2. With --oracle_shift = ceiling of graph 2 as '
@@ -290,7 +294,8 @@ if __name__ == '__main__':
                           hyper_virtual=not args.hyper_no_virtual,
                           hyper_virtual_source=args.hyper_virtual_source,
                           cut=args.cut, cut_tau=args.cut_tau, con_by=args.con_by,
-                          split_heads=args.split_heads, graph2_node=args.graph2_node).to(device)
+                          split_heads=args.split_heads, graph2_node=args.graph2_node,
+                          chain=args.chain).to(device)
     print(model)
     print('training parameters: {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

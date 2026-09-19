@@ -6,7 +6,7 @@ from semantic_GAT import SemanticContextGraph
 from shift import ShiftHead, build_shift_pairs, polarity_map, shift_labels
 from hypergraph import EmotionalHyperGraph
 from sheaf import EmotionalGATGraph, EmotionalSheafGraph, consistency, predict_shift
-from contrastive import cosine_shift, cosine_consistency
+from contrastive import cosine_shift, cosine_consistency, cosine_adjacent
 
 
 class MaskedNLLLoss(nn.Module):
@@ -52,7 +52,7 @@ class BaselineModel(nn.Module):
                  shift_mode='pair', soft_weight=False, init_mu=0.1,
                  graph2_bidir=False, hyper_attn=True, hyper_loo=True, hyper_virtual=True,
                  hyper_virtual_source='mean', cut='shift', cut_tau=0.5, con_by='polarity',
-                 split_heads=False, graph2_node='x'):
+                 split_heads=False, graph2_node='x', chain='both'):
         super(BaselineModel, self).__init__()
         assert len(modals) > 0 and set(modals) <= set('tav'), "modals must be a subset of 'tav'"
         self.modals, self.use_graph, self.use_shift = modals, use_graph, use_shift
@@ -60,7 +60,7 @@ class BaselineModel(nn.Module):
         # split_heads: graph 1 is trained only by the contrastive loss (detached before it
         # can receive the ERC loss); the classifier reads only h2. Isolates graph 2 as the
         # classifier and, with --oracle_shift, gives its ceiling under a perfect partition.
-        self.split_heads, self.graph2_node = split_heads, graph2_node
+        self.split_heads, self.graph2_node, self.chain = split_heads, graph2_node, chain
         if split_heads and graph2 == 'none':
             raise ValueError('--split_heads needs graph2 != none')
         if hyper_virtual_source not in ('mean', 'graph1'):
@@ -147,6 +147,18 @@ class BaselineModel(nn.Module):
                 sp = cosine_shift(gh1, qmask, umask, prev, valid, self.cut_tau)
             else:
                 sp = predict_shift(shift_logits.detach(), tau=self.shift_tau)   # [B, T, 2] bool
+            shift_adj = None
+            if self.chain == 'time':
+                if self.oracle_shift:
+                    p_ = self.pol[labels.clamp(min=0)]
+                    shift_adj = torch.zeros_like(umask, dtype=torch.bool)
+                    shift_adj[:, 1:] = (p_[:, 1:] != p_[:, :-1]) & umask[:, 1:].bool() & umask[:, :-1].bool()
+                elif self.cut == 'cosine':
+                    shift_adj = cosine_adjacent(gh1, umask, self.cut_tau)
+                else:                       # shift head: adjacent pair is whichever channel hits i-1
+                    tt = torch.arange(umask.size(1), device=umask.device)
+                    is_adj = (prev == (tt[None, :, None] - 1)) & valid
+                    shift_adj = (sp & is_adj).any(-1)
             soft = getattr(self.emo, 'soft_weight', False)
             if soft and self.cut == 'cosine':
                 cons = cosine_consistency(gh1, qmask, umask, prev, valid)
@@ -161,9 +173,11 @@ class BaselineModel(nn.Module):
             if self.graph2 == 'hyper':
                 virtual_node = gh1 if self.hyper_virtual_source == 'graph1' else None
                 h2 = sum(self.emo(g2in, qmask, umask, sp, prev, valid, cons=cons,
+                                  chain=self.chain, shift_adj=shift_adj,
                                   virtual_node=virtual_node))
             else:
-                h2 = sum(self.emo(g2in, qmask, umask, sp, prev, valid, cons=cons))
+                h2 = sum(self.emo(g2in, qmask, umask, sp, prev, valid, cons=cons,
+                                  chain=self.chain, shift_adj=shift_adj))
             if self.split_heads:
                 h = self.ln2(h2)                    # classifier reads only graph 2
             else:

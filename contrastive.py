@@ -82,3 +82,12 @@ def cosine_consistency(h, qmask, umask, prev, valid):
     z_i = z.unsqueeze(2).expand(-1, -1, 2, -1)
     z_s = torch.gather(z_i, 1, prev.unsqueeze(-1).expand(-1, -1, -1, z.size(-1)))
     return ((z_s * z_i).sum(-1).clamp(-1, 1) + 1) / 2              # [B, T, 2] in [0,1]
+
+
+def cosine_adjacent(h, umask, tau=0.5):
+    """Adjacent temporal shift: 1 - cos(h_{i-1}, h_i) > tau. Returns [B, T] bool (col 0 = False)."""
+    z = F.normalize(h, dim=-1)
+    d = 1.0 - (z[:, 1:] * z[:, :-1]).sum(-1)                # [B, T-1]
+    out = torch.zeros(h.size(0), h.size(1), dtype=torch.bool, device=h.device)
+    out[:, 1:] = (d > tau) & umask[:, 1:].bool() & umask[:, :-1].bool()
+    return out
